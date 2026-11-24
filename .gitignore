@@ -1,0 +1,29 @@
+# Database
+*.db
+*.sqlite3
+
+# Env
+.env
+
+# ML models
+*.pkl
+
+# Cache
+__pycache__/
+*.pyc
+
+# Personal / large files
+*.pdf
+*.pptx
+*.jpeg
+*.jpg
+*.csv
+~$*
+
+# OS
+.DS_Store
+
+.venv/
+venv/
+pfm_proj.zip
+*.zip

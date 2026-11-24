@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinTrust | FraudShield — Financial Institution</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/lender_workspace.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/lender_workspace_refinement.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/fraud_shield.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/fontawesome/css/all.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/icon_fallback.css') }}">
+    <script defer src="{{ url_for('static', filename='js/icon_fallback.js') }}"></script>
+</head>
+
+<body>
+    <div class="lender-workspace system-fraud-mode" data-system-mode="fraud">
+
+        <!-- ============================================================
+             HEADER
+        ============================================================= -->
+        <header class="lw-header">
+            <div class="lw-brand">
+                <div class="lw-brand-mark"><i class="fa-solid fa-building-columns"></i></div>
+                <div class="lw-brand-text">
+                    <span class="lw-brand-product">FinTrust</span>
+                    <span class="lw-brand-title">Financial Institution Workspace</span>
+                </div>
+            </div>
+            <div class="lw-header-right">
+                <div class="lw-live-status" aria-label="Workspace status">
+                    <span class="lw-live-dot" aria-hidden="true"></span>
+                    <span>Live workspace</span>
+                </div>
+                <div class="lw-analyst">
+                    <div class="lw-analyst-avatar" id="lwAnalystAvatar" aria-hidden="true">…</div>
+                    <div class="lw-analyst-identity">
+                        <div class="lw-analyst-name" id="lwAnalystName">Loading…</div>
+                        <div class="lw-analyst-role" id="lwAnalystRole">Credit Risk Analyst</div>
+                    </div>
+                </div>
+                <a class="lw-signout" id="logoutLink"><i class="fa-solid fa-arrow-right-from-bracket"></i> Sign out</a>
+            </div>
+        </header>
+
+        <!-- ============================================================
+             CASE IDENTITY BAR — filled from currentApplication
+        ============================================================= -->
+        <div class="lw-context-strip phase1-hidden" id="lwContextStrip" style="display:none!important;">
+            <div class="lw-context-item">
+                <span class="lw-context-label">Applicant</span>
+                <span class="lw-context-value" id="lwContextApplicant">—</span>
+            </div>
+            <div class="lw-context-item">
+                <span class="lw-context-label">Reference</span>
+                <span class="lw-context-value lw-context-muted" id="lwContextReference">—</span>
+            </div>
+            <div class="lw-context-item">
+                <span class="lw-context-label">Purpose</span>
+                <span class="lw-context-value" id="lwContextPurpose">—</span>
+            </div>
+            <div class="lw-context-item">
+                <span class="lw-context-label">Loan Amount</span>
+                <span class="lw-context-value" id="lwContextAmount">—</span>
+            </div>
+            <div class="lw-context-item">
+                <span class="lw-context-label">Status</span>
+                <span class="lw-context-value lw-context-muted" id="lwContextStatus">—</span>
+            </div>
+            <!-- PHASE 9 — AI Risk Analyst trigger. Hidden by default;
+                 lwUpdateContextStrip() only reveals it once currentApplication
+                 has a persisted assessment_result. -->
+            <button type="button" id="lwAskRiskAnalystBtn" class="lw-ra-trigger-btn" style="display:none;">
+                <i class="fa-solid fa-user-shield"></i> Ask Risk Analyst
+            </button>
+        </div>
+
+        <div class="lw-desk">
+            <nav class="lw-nav">
+                <div class="lw-system-switcher" role="tablist" aria-label="Institution systems">
+                    <div class="lw-system-switcher-label">SYSTEMS</div>
+                    <div class="lw-system-switcher-buttons">
+                        <button type="button" class="lw-system-switch-btn active" data-system="fraud" role="tab" aria-selected="true">
+                            <i class="fa-solid fa-shield-halved"></i><span>FraudShield</span>
+                        </button>
+                        <button type="button" class="lw-system-switch-btn" data-system="lender" role="tab" aria-selected="false">
+                            <i class="fa-solid fa-building-columns"></i><span>Lender System</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="lw-nav-group lender-system-nav">
+                    <div class="lw-nav-group-label">Work Queue</div>
+                    <button type="button" class="lw-nav-item" data-section="queue"><i
+                            class="fa-solid fa-inbox"></i>
+                        Queue</button>
+                </div>
+                <div class="lw-nav-group lender-system-nav">
+                    <div class="lw-nav-group-label">Case Review</div>
+                    <button type="button" class="lw-nav-item" data-section="application" style="display:none;"><i
+                            class="fa-solid fa-file-invoice"></i> Application</button>
+                    <button type="button" class="lw-nav-item" data-section="assessment"><i
+                            class="fa-solid fa-gauge-high"></i>
+                        Overview</button>
+                    <button type="button" class="lw-nav-item" data-section="affordability"><i
+                            class="fa-solid fa-sack-dollar"></i> Repayment Capacity</button>
+                    <button type="button" class="lw-nav-item" data-section="evidence"><i
+                            class="fa-solid fa-file-lines"></i>
+                        Borrower Evidence</button>
+                </div>
+                <div class="lw-nav-group lender-system-nav">
+                    <div class="lw-nav-group-label">Risk Analysis</div>
+                    <button type="button" class="lw-nav-item" data-section="explain"><i
+                            class="fa-solid fa-magnifying-glass-chart"></i> Decision Explanation</button>
+                    <button type="button" class="lw-nav-item" data-section="anomaly"><i
+                            class="fa-solid fa-triangle-exclamation"></i> Anomaly Detection</button>
+                    <button type="button" class="lw-nav-item" data-section="scenario"><i class="fa-solid fa-flask"></i>
+                        Scenario Analysis</button>
+                </div>
+                <div class="lw-nav-group lender-system-nav">
+                    <div class="lw-nav-group-label">Portfolio Intelligence</div>
+                    <button type="button" class="lw-nav-item" data-section="portfolio"><i class="fa-solid fa-chart-pie"></i> Portfolio Risk</button>
+                    <button type="button" class="lw-nav-item" data-section="audit"><i class="fa-solid fa-file-shield"></i> Decision Ledger</button>
+                </div>
+                <div class="lw-nav-group fraudshield-nav-group fraud-system-nav">
+                    <div class="lw-nav-group-label">FraudShield · Detection</div>
+                    <button type="button" class="lw-nav-item active" data-section="fraud-monitor"><i
+                            class="fa-solid fa-shield-halved"></i> Transaction Monitor</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-alerts"><i
+                            class="fa-solid fa-bell"></i> Risk Alerts</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-rules"><i
+                            class="fa-solid fa-sliders"></i> Detection Rules</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-behavior"><i
+                            class="fa-solid fa-fingerprint"></i> Behavioral Profiles</button>
+                </div>
+                <div class="lw-nav-group fraudshield-nav-group fraud-system-nav">
+                    <div class="lw-nav-group-label">FraudShield · Intelligence</div>
+                    <button type="button" class="lw-nav-item" data-section="fraud-network"><i
+                            class="fa-solid fa-share-nodes"></i> Fraud Network</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-simulator"><i
+                            class="fa-solid fa-flask-vial"></i> Attack Simulator</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-model"><i
+                            class="fa-solid fa-microchip"></i> Model Center</button>
+                </div>
+                <div class="lw-nav-group fraudshield-nav-group fraud-system-nav">
+                    <div class="lw-nav-group-label">FraudShield · Operations</div>
+                    <button type="button" class="lw-nav-item" data-section="fraud-investigations"><i
+                            class="fa-solid fa-magnifying-glass"></i> Investigations</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-autopilot"><i
+                            class="fa-solid fa-bolt"></i> Fraud Autopilot</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-copilot"><i
+                            class="fa-solid fa-robot"></i> Investigation Copilot</button>
+                    <button type="button" class="lw-nav-item" data-section="fraud-security"><i
+                            class="fa-solid fa-lock"></i> Security & Health</button>
+                </div>
+                <div class="lw-nav-group lender-system-nav">
+                    <div class="lw-nav-group-label">Governance</div>
+                    <button type="button" class="lw-nav-item" data-section="responsible"><i
+                            class="fa-solid fa-scale-balanced"></i> Responsible AI</button>
+                </div>
+            </nav>
+
+            <main class="lw-main">
+
+                <!-- ========================================================
+                 0. PENDING APPLICATION QUEUE (PHASE 2 landing view)
+            ========================================================= -->
+                <section class="lw-section" data-section="queue" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-inbox"></i> Pending Applications</div>
+                            <div class="lw-section-subtitle">Review, assess, and route active credit applications.</div>
+                        </div>
+                        <div class="lw-section-live-meta">
+                            <span class="lw-live-pulse"></span>
+                            <span id="lwQueueLiveMeta">Live queue</span>
+                        </div>
+                    </div>
+                    <div id="lwQueueBody">
+                        <div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading applications...
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 0b. APPLICATION DETAIL (read-only review, reached via
+                     "Review Application" — not a top-level nav tab)
+            ========================================================= -->
+                <section class="lw-section" data-section="detail" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-panel-title"><i class="fa-solid fa-file-invoice"></i> Application Case File</div>
+                        <button type="button" class="lw-btn" id="lwBackToQueueBtn"><i
+                                class="fa-solid fa-arrow-left"></i> Back to Queue</button>
+                    </div>
+                    <div id="lwDetailBody">
+                        <div class="lw-empty-sub">Select an application from the queue to review it.</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 1. APPLICATION (intake form)
+            ========================================================= -->
+                <section class="lw-section" data-section="application" style="display:none!important;">
+                    <div class="lw-panel">
+                        <div class="lw-panel-header">
+                            <div class="lw-panel-title"><i class="fa-solid fa-file-invoice"></i> Application Details
+                            </div>
+                            <div class="lw-panel-note">POST /api/credit-risk/assess</div>
+                        </div>
+
+                        <form id="lenderAssessmentForm" novalidate>
+
+                            <div class="lw-form-group-title">Application</div>
+                            <div class="lw-disclaimer" style="margin-bottom:14px;">
+                                <i class="fa-solid fa-circle-info"></i>
+                                <span>The fields below (name, reference IDs, date) are record-keeping only.
+                                    They are <strong>not</strong> sent to the risk model — only the credit
+                                    profile fields further down are submitted for assessment.</span>
+                            </div>
+                            <div class="lw-form-grid">
+                                <div class="lw-field">
+                                    <label for="lw_meta_applicant_name">Applicant Name</label>
+                                    <input type="text" id="lw_meta_applicant_name" placeholder="e.g. Priya Sharma">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_meta_application_id">Application / Reference ID</label>
+                                    <input type="text" id="lw_meta_application_id"
+                                        placeholder="Auto-generated if left blank">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_meta_application_date">Loan Application Date</label>
+                                    <input type="date" id="lw_meta_application_date">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_purpose">Purpose</label>
+                                    <select id="lw_purpose">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A40">Car (new)</option>
+                                        <option value="A41">Car (used)</option>
+                                        <option value="A42">Furniture / equipment</option>
+                                        <option value="A43">Radio / television</option>
+                                        <option value="A44">Domestic appliances</option>
+                                        <option value="A45">Repairs</option>
+                                        <option value="A46">Education</option>
+                                        <option value="A48">Retraining</option>
+                                        <option value="A49">Business</option>
+                                        <option value="A410">Other</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_credit_amount">Loan Amount <span class="lw-context-muted">(model
+                                            units,
+                                            not ₹)</span></label>
+                                    <input type="number" id="lw_credit_amount" min="0" step="1" placeholder="e.g. 1500">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_duration_months">Loan Tenure (months)</label>
+                                    <input type="number" id="lw_duration_months" min="1" step="1" placeholder="e.g. 24">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_installment_rate">Installment Commitment</label>
+                                    <select id="lw_installment_rate">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="1">Low (~1 band)</option>
+                                        <option value="2">Moderate (~2 band)</option>
+                                        <option value="3">High (~3 band)</option>
+                                        <option value="4">Very high (~4 band)</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="lw-form-group-title">Credit Profile</div>
+                            <div class="lw-form-grid">
+                                <div class="lw-field">
+                                    <label for="lw_checking_account">Checking Account</label>
+                                    <select id="lw_checking_account">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A11">Overdrawn</option>
+                                        <option value="A12">Low balance</option>
+                                        <option value="A13">Adequate balance</option>
+                                        <option value="A14">No checking account</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_credit_history">Credit History</label>
+                                    <select id="lw_credit_history">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A30">No credit taken previously</option>
+                                        <option value="A31">All previous credit paid on time</option>
+                                        <option value="A32">Existing credit paid on time so far</option>
+                                        <option value="A33">Repayment delays in the past</option>
+                                        <option value="A34">Critical credit history</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_existing_credits">Existing Credit Lines (this lender)</label>
+                                    <input type="number" id="lw_existing_credits" min="1" step="1" placeholder="e.g. 1">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_other_installment_plans">Other Installment Plans</label>
+                                    <select id="lw_other_installment_plans">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A141">Bank</option>
+                                        <option value="A142">Retail / store financing</option>
+                                        <option value="A143">None</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_savings_account">Savings</label>
+                                    <select id="lw_savings_account">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A61">Minimal savings</option>
+                                        <option value="A62">Low savings balance</option>
+                                        <option value="A63">Moderate savings balance</option>
+                                        <option value="A64">High savings balance</option>
+                                        <option value="A65">No savings account / unknown</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="lw-form-group-title">Employment &amp; Stability</div>
+                            <div class="lw-form-grid">
+                                <div class="lw-field">
+                                    <label for="lw_employment_since">Employment Duration</label>
+                                    <select id="lw_employment_since">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A71">Unemployed</option>
+                                        <option value="A72">Less than 1 year</option>
+                                        <option value="A73">1 – 4 years</option>
+                                        <option value="A74">4 – 7 years</option>
+                                        <option value="A75">7+ years</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_job">Job Type</label>
+                                    <select id="lw_job">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A171">Unemployed / unskilled, non-resident</option>
+                                        <option value="A172">Unskilled, resident</option>
+                                        <option value="A173">Skilled employee / official</option>
+                                        <option value="A174">Management / self-employed / highly qualified</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_residence_since">Residence Duration (years)</label>
+                                    <input type="number" id="lw_residence_since" min="1" step="1" placeholder="e.g. 2">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_housing">Housing</label>
+                                    <select id="lw_housing">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A151">Rent</option>
+                                        <option value="A152">Own</option>
+                                        <option value="A153">For free</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_property">Property</label>
+                                    <select id="lw_property">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A121">Real estate</option>
+                                        <option value="A122">Building society savings / life insurance</option>
+                                        <option value="A123">Car or other</option>
+                                        <option value="A124">Unknown / no property</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="lw-form-group-title">Applicant Profile</div>
+                            <div class="lw-form-grid">
+                                <div class="lw-field">
+                                    <label for="lw_age">Age</label>
+                                    <input type="number" id="lw_age" min="18" step="1" placeholder="e.g. 35">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_personal_status_sex">Applicant Personal Status</label>
+                                    <select id="lw_personal_status_sex">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A91">Male : divorced / separated</option>
+                                        <option value="A92">Female : divorced / separated / married</option>
+                                        <option value="A93">Male : single</option>
+                                        <option value="A94">Male : married / widowed</option>
+                                        <option value="A95">Female : single</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_dependents">Number of Dependents</label>
+                                    <input type="number" id="lw_dependents" min="1" step="1" placeholder="1 or 2">
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_telephone">Registered Telephone</label>
+                                    <select id="lw_telephone">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A191">None</option>
+                                        <option value="A192">Yes, under applicant's name</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_foreign_worker">Foreign Worker Status</label>
+                                    <select id="lw_foreign_worker">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A201">Yes</option>
+                                        <option value="A202">No</option>
+                                    </select>
+                                </div>
+                                <div class="lw-field">
+                                    <label for="lw_other_debtors">Other Debtors / Guarantors</label>
+                                    <select id="lw_other_debtors">
+                                        <option value="" disabled selected>Select...</option>
+                                        <option value="A101">None</option>
+                                        <option value="A102">Co-applicant</option>
+                                        <option value="A103">Guarantor</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="lw-form-group-title">Borrower Record Linkage</div>
+                            <div class="lw-disclaimer" style="margin-bottom:14px;">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                <span>Repayment Capacity and Borrower Evidence are based on the borrower's own
+                                    FinTrust financial history — never the signed-in lender's. This workspace does
+                                    not yet have a verified way to link an application to a specific borrower's
+                                    account, so those sections will show as unavailable until that linkage exists.
+                                    Do not treat any figures shown there as the lender's own finances.</span>
+                            </div>
+                            <div class="lw-form-grid">
+                                <div class="lw-field">
+                                    <label for="lw_meta_borrower_id">Borrower Account Reference (optional)</label>
+                                    <input type="text" id="lw_meta_borrower_id"
+                                        placeholder="Not yet linkable in this phase">
+                                </div>
+                            </div>
+
+                            <div id="lwFormErrors" class="lw-error-list hidden"></div>
+
+                            <div class="lw-form-actions">
+                                <button type="submit" id="lwSubmitBtn" class="lw-btn lw-btn-primary"><i
+                                        class="fa-solid fa-shield-halved"></i> Assess Application</button>
+                                <button type="button" id="lwResetBtn" class="lw-btn"><i
+                                        class="fa-solid fa-rotate-left"></i>
+                                    Clear Form</button>
+                            </div>
+                        </form>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 2. ASSESSMENT OVERVIEW (primary underwriting console)
+            ========================================================= -->
+                <section class="lw-section" data-section="assessment" style="display:none!important;">
+                    <div class="lw-grid lw-overview-grid">
+                        <div class="lw-surface" id="lwAssessmentBody">
+                            <div class="lw-empty" id="lwEmptyState">
+                                <i class="fa-solid fa-file-circle-question"></i>
+                                <div class="lw-empty-title">No application assessed yet</div>
+                                <div class="lw-empty-sub">Select an application from the Queue and run the AI Credit
+                                    Assessment to see risk and decision here.</div>
+                            </div>
+                        </div>
+
+                        <div class="lw-surface" id="lwSnapshotPanel">
+                            <div class="lw-panel-header">
+                                <div class="lw-panel-title"><i class="fa-solid fa-list-check"></i> Underwriting Snapshot
+                                </div>
+                            </div>
+                            <div id="lwSnapshotBody">
+                                <div class="lw-empty-sub">Cached instrument states appear here after they have been
+                                    loaded
+                                    for this application.</div>
+                            </div>
+
+                            <div id="lwSummaryPanel"
+                                style="display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--lw-border);">
+                                <div class="lw-panel-title" style="margin-bottom:8px;"><i
+                                        class="fa-solid fa-clipboard-check"></i> Final Decision Summary</div>
+                                <div class="lw-summary-card" id="lwSummaryCard"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="lw-surface lw-panel-wide" id="lwRiskDecompositionPanel">
+                        <div class="lw-panel-header">
+                            <div class="lw-panel-title"><i class="fa-solid fa-magnifying-glass-chart"></i> Risk
+                                Decomposition</div>
+                            <button type="button" class="lw-btn" onclick="lwSwitchTab('explain')"><i
+                                    class="fa-solid fa-eye"></i> Full Explanation</button>
+                        </div>
+                        <div id="lwRiskDecompositionBody">
+                            <div class="lw-empty-sub">Open Decision Explanation once to load SHAP factors for this
+                                application. They will appear here without a second fetch.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 3. REPAYMENT CAPACITY (existing entry point, kept intact)
+            ========================================================= -->
+                <section class="lw-section" data-section="affordability" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-panel-title"><i class="fa-solid fa-sack-dollar"></i> Repayment Capacity
+                            <span class="lw-badge">Real ₹ vs model units</span>
+                        </div>
+                        <div class="lw-panel-note">Live, per application</div>
+                    </div>
+                    <div id="lwAffordabilityBody">
+                        <div class="lw-empty-sub">No application selected. Select one from the queue to load repayment
+                            capacity.</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 4. BORROWER EVIDENCE (existing entry point, kept intact)
+            ========================================================= -->
+                <section class="lw-section" data-section="evidence" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-panel-title"><i class="fa-solid fa-file-lines"></i> Borrower Evidence
+                            <span class="lw-badge">Real ₹ figures</span>
+                        </div>
+                        <div class="lw-panel-note">Live, per application</div>
+                    </div>
+                    <div id="lwBehaviorBody">
+                        <div class="lw-empty-sub">No application selected. Select one from the queue to load borrower
+                            evidence.</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 5. DECISION EXPLANATION (existing entry point, kept intact)
+            ========================================================= -->
+                <section class="lw-section" data-section="explain" style="display:none!important;">
+                    <div class="lw-surface" id="lwExplainBody">
+                        <div class="lw-panel-header">
+                            <div class="lw-panel-title"><i class="fa-solid fa-magnifying-glass-chart"></i> Decision
+                                Explanation</div>
+                            <div class="lw-panel-note">SHAP model contribution — not a causal claim</div>
+                        </div>
+                        <div class="lw-empty-sub">No application selected. Select one from the queue to see the risk
+                            factors
+                            behind its decision.</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 6. APPLICATION ANOMALY (existing entry point, kept intact)
+            ========================================================= -->
+                <section class="lw-section" data-section="anomaly" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-panel-title"><i class="fa-solid fa-triangle-exclamation"></i> Application Anomaly
+                        </div>
+                        <div class="lw-panel-note">Live, per application</div>
+                    </div>
+                    <div id="lwAnomalyBody">
+                        <div class="lw-empty-sub">No application selected. Select one from the queue to check for
+                            anomalies.
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 7. UNDERWRITING DECISION SIMULATOR (Scenario Analysis,
+                    upgraded presentation — existing entry point / ids kept
+                    intact so nothing else in the page needs to change)
+            ========================================================= -->
+                <section class="lw-section" data-section="scenario" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-panel-title"><i class="fa-solid fa-flask"></i> Underwriting Decision Simulator
+                        </div>
+                        <div class="lw-panel-note">Hypothetical, not saved</div>
+                    </div>
+                    <div id="lwScenarioControls">
+                        <div class="lw-empty-sub">No application selected. Select one from the queue first — scenario
+                            analysis compares against that baseline.</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 8. PORTFOLIO RISK INTELLIGENCE
+            ========================================================= -->
+                <section class="lw-section" data-section="portfolio" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-panel-title"><i class="fa-solid fa-chart-pie"></i> Portfolio Risk Intelligence</div>
+                        <button type="button" class="lw-btn" id="lwRefreshPortfolioBtn"><i class="fa-solid fa-rotate"></i> Refresh</button>
+                    </div>
+                    <div id="lwPortfolioBody">
+                        <div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading portfolio risk...</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 9. DECISION LEDGER
+            ========================================================= -->
+                <section class="lw-section" data-section="audit" style="display:none!important;">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-file-shield"></i> Decision Ledger</div>
+                            <div class="lw-section-subtitle">Immutable assessment and lending-decision activity for your portfolio.</div>
+                        </div>
+                        <div class="lw-section-live-actions">
+                            <span class="lw-data-fresh" id="lwAuditFreshMeta">Waiting for data</span>
+                            <button type="button" class="lw-btn" id="lwRefreshAuditBtn"><i class="fa-solid fa-rotate"></i> Refresh</button>
+                        </div>
+                    </div>
+                    <div id="lwAuditBody">
+                        <div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading decision history...</div>
+                    </div>
+                </section>
+
+                <!-- ========================================================
+                 FRAUDSHIELD — TRANSACTION MONITOR
+            ========================================================= -->
+                <section class="lw-section lw-section-active" data-section="fraud-monitor">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-shield-halved"></i> FraudShield — Transaction Monitor</div>
+                            <div class="lw-section-subtitle">Independent transaction-risk monitoring for activity observed by your institution. Scores prioritize review — a human always makes the final call.</div>
+                        </div>
+                        <div class="lw-section-live-actions">
+                            <span class="lw-data-fresh" id="lwFraudFreshMeta">Waiting for data</span>
+                            <button type="button" class="lw-btn" id="lwNewFraudTransactionBtn"><i class="fa-solid fa-plus"></i> New Transaction</button>
+                            <button type="button" class="lw-btn" id="lwRefreshFraudBtn"><i class="fa-solid fa-rotate"></i> Refresh</button>
+                        </div>
+                    </div>
+                    <div id="lwFraudSummary"></div>
+                    <div id="lwFraudMonitorBody">
+                        <div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading transaction monitor...</div>
+                    </div>
+                    <div id="lwFraudDetailModal" class="lw-fraud-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Transaction risk analysis">
+    <div class="lw-fraud-modal-backdrop" data-fraud-modal-close></div>
+    <div class="lw-fraud-modal-panel" role="document">
+        <div id="lwFraudDetailModalBody"></div>
+    </div>
+</div>
+                </section>
+
+                <!-- ========================================================
+                 FRAUDSHIELD — INVESTIGATIONS
+            ========================================================= -->
+                <section class="lw-section" data-section="fraud-autopilot">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-bolt"></i> FraudShield — Autonomous Response</div>
+                            <div class="lw-section-subtitle">Automatically contain high-risk activity, open cases, prepare evidence, and notify the internal security team while keeping government reporting human-approved.</div>
+                        </div>
+                        <div class="lw-section-live-actions">
+                            <span class="lw-data-fresh" id="lwFraudAutopilotStatus">Autopilot ready</span>
+                            <button type="button" class="lw-btn" id="lwFraudAutopilotScanBtn"><i class="fa-solid fa-crosshairs"></i> Scan Current Alerts</button>
+                            <button type="button" class="lw-btn lw-btn-primary" id="lwFraudAutopilotSaveBtn"><i class="fa-solid fa-floppy-disk"></i> Save Policy</button>
+                        </div>
+                    </div>
+                    <div id="lwFraudAutopilotBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading response policy...</div></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-investigations">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-magnifying-glass"></i> FraudShield — Investigations</div>
+                            <div class="lw-section-subtitle">Cases opened for elevated-risk transactions.</div>
+                        </div>
+                        <div class="lw-section-live-actions">
+                            <button type="button" class="lw-btn" id="lwRefreshInvestigationsBtn"><i class="fa-solid fa-rotate"></i> Refresh</button>
+                        </div>
+                    </div>
+                    <div id="lwInvestigationsBody">
+                        <div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading investigations...</div>
+                    </div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-alerts">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-bell"></i> FraudShield — Risk Alerts</div>
+                            <div class="lw-section-subtitle">Prioritized alert triage across the institution's monitored event stream.</div>
+                        </div>
+                    </div>
+                    <div id="lwFraudAlertsBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading risk alerts...</div></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-behavior">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-fingerprint"></i> FraudShield — Behavioral Profiles</div>
+                            <div class="lw-section-subtitle">Learn what normal looks like before judging what is unusual.</div>
+                        </div>
+                    </div>
+                    <div id="lwFraudBehaviorBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading behavioral intelligence...</div></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-network">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-share-nodes"></i> FraudShield — Fraud Network</div>
+                            <div class="lw-section-subtitle">Relationship intelligence for shared devices, merchants and beneficiaries.</div>
+                        </div>
+                    </div>
+                    <div id="lwFraudNetworkBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Building transaction graph...</div></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-simulator">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-flask-vial"></i> FraudShield — Attack Simulator</div>
+                            <div class="lw-section-subtitle">Safely simulate attack patterns against the same scoring pipeline.</div>
+                        </div>
+                    </div>
+                    <div id="lwFraudSimulatorBody"></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-rules">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-sliders"></i> FraudShield — Detection Rules</div>
+                            <div class="lw-section-subtitle">Configure institution-specific rule thresholds and weights used alongside ML, behavioral and network risk signals.</div>
+                        </div>
+                        <div class="lw-section-live-actions">
+                            <span class="lw-data-fresh" id="lwFraudRulesStatus">Policy ready</span>
+                            <button type="button" class="lw-btn lw-btn-primary" id="lwFraudRulesSaveBtn"><i class="fa-solid fa-floppy-disk"></i> Save & Re-score</button>
+                        </div>
+                    </div>
+                    <div id="lwFraudRulesBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading detection policy...</div></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-model">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-microchip"></i> FraudShield — Model Center</div>
+                            <div class="lw-section-subtitle">Model health, dataset provenance, feature contract and retraining controls.</div>
+                        </div>
+                        <div class="lw-section-live-actions"><button type="button" class="lw-btn" id="lwFraudRetrainBtn"><i class="fa-solid fa-rotate"></i> Retrain</button></div>
+                    </div>
+                    <div id="lwFraudModelCenterBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading model center...</div></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-copilot">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-robot"></i> FraudShield — Investigation Copilot</div>
+                            <div class="lw-section-subtitle">Ask evidence-grounded questions about monitored activity.</div>
+                        </div>
+                    </div>
+                    <div id="lwFraudCopilotBody"></div>
+                </section>
+
+                <section class="lw-section" data-section="fraud-security">
+                    <div class="lw-blotter-head">
+                        <div class="lw-section-heading">
+                            <div class="lw-panel-title"><i class="fa-solid fa-lock"></i> FraudShield — Security & Health</div>
+                            <div class="lw-section-subtitle">Integrity, authorization, replay protection, auditability and service health.</div>
+                        </div>
+                    </div>
+                    <div id="lwFraudSecurityBody"><div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Checking controls...</div></div>
+                </section>
+
+                <!-- ========================================================
+                 8. RESPONSIBLE AI (existing entry point, kept intact)
+            ========================================================= -->
+                <section class="lw-section" data-section="responsible" style="display:none!important;">
+                    <div class="lw-surface" id="lwResponsibleBody">
+                        <div class="lw-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading responsible AI
+                            metrics...</div>
+                    </div>
+                </section>
+
+            </main>
+        </div>
+
+        <!-- ============================================================
+             FINAL LENDING DECISION — persistent decision dock
+             Lives OUTSIDE .lw-desk but INSIDE .lender-workspace: tab
+             switching only toggles .lw-section-active, so this stays
+             visible across every tab (Assessment Overview, Repayment
+             Capacity, Borrower Evidence, Decision Explanation,
+             Application Anomaly, Scenario Analysis, Responsible AI)
+             without being duplicated in any of them. Hidden entirely
+             when no application is selected; driven solely by
+             currentApplication (see renderLwFinalDecisionBlock() in
+             lender_workspace.js) so it can never show a stale/mismatched
+             application's decision state. Must stay inside
+             .lender-workspace so it inherits the design system's CSS
+             variables, font, button/badge styles, and theme colors.
+        ============================================================= -->
+        <div id="lwWorkspaceToast" class="lw-workspace-toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+        <div id="lwDecisionDock" class="lw-decision-dock phase1-hidden" style="display:none!important;">
+            <div id="lwDecisionDockBody"></div>
+        </div>
+
+        <!-- ========================================================
+             FINAL LENDING DECISION — confirmation modal
+             (generic confirm/cancel; used for Approve/Reject only)
+
+             Lives inside .lender-workspace (same reasoning as
+             #lwDecisionDock above) so it inherits the design system's
+             --lw-* CSS variables, font, and theme colors instead of
+             falling back to browser defaults. `style="display:none"`
+             is the only inline style kept — it's the existing
+             show/hide hook the modal JS toggles, left untouched.
+             Everything else is scoped lender-workspace CSS
+             (.lw-confirm-*) instead of hardcoded inline styling.
+        ============================================================= -->
+        <div id="lwConfirmModal" class="lw-confirm-overlay" style="display:none;">
+            <div class="lw-confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="lwConfirmModalTitle"
+                aria-describedby="lwConfirmModalMessage" tabindex="-1">
+                <div id="lwConfirmModalTitle" class="lw-confirm-title">Confirm</div>
+                <div id="lwConfirmModalMessage" class="lw-confirm-message"></div>
+                <div class="lw-confirm-actions">
+                    <button type="button" class="lw-btn" id="lwConfirmModalCancel">Cancel</button>
+                    <button type="button" class="lw-btn lw-btn-primary" id="lwConfirmModalConfirm">Confirm</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================
+             PHASE 9 — AI RISK ANALYST
+             Q&A over the CURRENT application's already-persisted
+             assessment_result. Never computes a new score, never makes
+             an approve/reject call — see services/risk_assistant_service.py.
+             Scoped lender-workspace CSS (.lw-ra-*), same dark-navy
+             underwriting-terminal treatment as the rest of the panel —
+             deliberately not styled like a generic chat product.
+        ============================================================= -->
+        <div id="lwRiskAssistantModal" class="lw-ra-overlay" style="display:none;">
+            <div class="lw-ra-panel" role="dialog" aria-modal="true" aria-labelledby="lwRaTitle" tabindex="-1">
+                <div class="lw-ra-header">
+                    <div class="lw-ra-header-title">
+                        <i class="fa-solid fa-user-shield"></i>
+                        <div>
+                            <div id="lwRaTitle" class="lw-ra-title">AI Risk Analyst</div>
+                            <div class="lw-ra-app-label" id="lwRaAppLabel">—</div>
+                        </div>
+                    </div>
+                    <button type="button" class="lw-ra-close-btn" id="lwRaCloseBtn" aria-label="Close">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div class="lw-ra-scope-note">
+                    <i class="fa-solid fa-circle-info"></i>
+                    Answers are grounded only in this application's existing assessment. It will not
+                    calculate a new risk score or make a decision for you.
+                </div>
+
+                <div class="lw-ra-suggested" id="lwRaSuggested"></div>
+
+                <div class="lw-ra-log" id="lwRaLog"></div>
+
+                <div class="lw-ra-composer">
+                    <div id="lwRaComposerError" class="lw-ra-composer-error hidden"></div>
+                    <div class="lw-ra-composer-row">
+                        <textarea id="lwRaQuestionInput" class="lw-ra-input" rows="1"
+                            placeholder="Ask about this application's assessment…" maxlength="500"></textarea>
+                        <button type="button" class="lw-btn lw-btn-primary lw-ra-ask-btn" id="lwRaAskBtn">
+                            <i class="fa-solid fa-paper-plane"></i> Ask
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/lender_workspace.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/fraud_shield.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            initLenderWorkspace();
+            if (typeof initLwFraudShield === 'function') initLwFraudShield();
+        });
+
+        document.getElementById('logoutLink').addEventListener('click', async () => {
+            try {
+                await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
+            } finally {
+                window.location.href = '/lender/login';
+            }
+        });
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,201 @@
+from flask import Flask, render_template, session, redirect, url_for, jsonify
+from flask_cors import CORS
+from dotenv import load_dotenv, find_dotenv
+import os
+
+# ─────────────────────────────────────────────────────────────
+# Environment
+# ─────────────────────────────────────────────────────────────
+
+load_dotenv(find_dotenv(), override=False)
+
+# ─────────────────────────────────────────────────────────────
+# Database
+# ─────────────────────────────────────────────────────────────
+from utils.db import init_db
+
+# ─────────────────────────────────────────────────────────────
+# Migrations
+# ─────────────────────────────────────────────────────────────
+from utils.db_migrate import run_migrations
+from utils.runtime_guard import install_runtime_guard, metrics_snapshot
+
+# ─────────────────────────────────────────────────────────────
+# Blueprints
+# ─────────────────────────────────────────────────────────────
+from routes.auth import auth_bp
+from routes.transactions import transactions_bp
+from routes.dashboard import dashboard_bp
+from routes.goals import goals_bp
+from routes.insights import insights_bp
+from routes.oauth import oauth_bp
+from routes.chatbot import chat_bp
+from routes.ai_insights import ai_insights_bp
+from routes.preview import preview_bp
+from routes.credit_risk import credit_risk_bp
+from routes.lender import lender_bp
+from routes.admin import admin_bp
+from routes.loan_application import loan_application_bp
+from routes.fraud_shield import fraud_shield_bp
+from routes.razorpay_payments import razorpay_payments_bp
+
+# ─────────────────────────────────────────────────────────────
+# App
+# ─────────────────────────────────────────────────────────────
+app = Flask(__name__)
+install_runtime_guard(app)
+
+# Secret key
+app.secret_key = os.getenv("SECRET_KEY")
+if not app.secret_key or len(app.secret_key) < 32 or app.secret_key in {"dev-secret-change-me", "replace-with-a-long-random-secret"}:
+    if os.getenv("FINTRUST_ENV", "production") != "development":
+        raise RuntimeError("A strong SECRET_KEY is required")
+    app.secret_key = os.urandom(32)
+
+# ─────────────────────────────────────────────────────────────
+# CORS
+# ─────────────────────────────────────────────────────────────
+CORS(
+    app,
+    supports_credentials=True,
+    resources={r"/*": {"origins": [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip() and origin.strip() != "*"]}},
+)
+
+# ─────────────────────────────────────────────────────────────
+# Session configuration
+# ─────────────────────────────────────────────────────────────
+# For production behind HTTPS, keep Secure enabled.
+# SameSite=Lax works for the normal web flow.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE=os.getenv("SESSION_COOKIE_SAMESITE", "Lax"),
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true",
+)
+
+# ─────────────────────────────────────────────────────────────
+# Database initialization
+# ─────────────────────────────────────────────────────────────
+try:
+    init_db()
+    run_migrations()
+    print("✅ Database initialized")
+except Exception as e:
+    app.logger.warning("Database initialization skipped: %s", type(e).__name__)
+
+# ─────────────────────────────────────────────────────────────
+# Register blueprints
+# ─────────────────────────────────────────────────────────────
+app.register_blueprint(oauth_bp)
+app.register_blueprint(auth_bp)
+app.register_blueprint(transactions_bp)
+app.register_blueprint(dashboard_bp)
+app.register_blueprint(goals_bp)
+app.register_blueprint(insights_bp)
+app.register_blueprint(chat_bp)
+app.register_blueprint(ai_insights_bp)
+app.register_blueprint(preview_bp)
+app.register_blueprint(credit_risk_bp)
+app.register_blueprint(lender_bp)
+app.register_blueprint(admin_bp)
+app.register_blueprint(loan_application_bp)
+app.register_blueprint(fraud_shield_bp)
+app.register_blueprint(razorpay_payments_bp)
+
+# ─────────────────────────────────────────────────────────────
+# Page routes
+# ─────────────────────────────────────────────────────────────
+
+@app.route("/")
+def home():
+    if session.get("logged_in"):
+        return render_template("index.html")
+
+    # Public workspace-selection landing page. Purely a navigation surface —
+    # it creates no session and performs no authentication or role check.
+    # Existing role enforcement still happens at /login and /lender/login.
+    return render_template("landing.html")
+
+
+@app.route("/login")
+def login_page():
+    return render_template("login.html")
+
+
+# ─────────────────────────────────────────────────────────────
+# Session/user verification endpoint
+# ─────────────────────────────────────────────────────────────
+
+@app.route("/me", methods=["GET"])
+def get_me():
+    """
+    Return the currently authenticated user.
+
+    PostgreSQL version:
+    Uses %s parameter placeholders rather than SQLite's ? syntax.
+    """
+    user_id = session.get("user_id")
+
+    if not user_id:
+        return {"error": "Unauthorized"}, 401
+
+    from utils.db import get_db
+
+    conn = get_db()
+
+    try:
+        user = conn.execute(
+            """
+            SELECT id, name, email
+            FROM users
+            WHERE id = %s
+            """,
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not user:
+        return {"error": "User not found"}, 404
+
+    return {
+        "data": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+        }
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Health check
+# ─────────────────────────────────────────────────────────────
+
+@app.route("/health")
+def health():
+    return {"status": "ok", "service": "fintrust"}
+
+@app.route("/ready")
+def ready():
+    from utils.db import get_db
+    try:
+        conn=get_db(); conn.execute("SELECT 1"); conn.close()
+        return {"status":"ready","database":"ok"}
+    except Exception:
+        return {"status":"not_ready","database":"unavailable"}, 503
+
+@app.route("/metrics")
+def metrics():
+    # Keep operational metrics aggregate-only; no user/account data is exposed.
+    return jsonify({"status":"success", **metrics_snapshot()})
+
+
+# ─────────────────────────────────────────────────────────────
+# Local development
+# ─────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 5000)),
+        debug=False,
+    )

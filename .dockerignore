@@ -1,0 +1,16 @@
+.venv
+__pycache__
+*.pyc
+.git
+.env
+node_modules
+.env.*
+!.env.example
+*.db
+*.sqlite3
+*.pdf
+*.pptx
+*.zip
+/add_transaction.jpeg
+/login.jpeg
+/data.csv

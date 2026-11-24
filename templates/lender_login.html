@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinTrust | Lender / Financial Institution Sign In</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=Caveat:wght@600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/fontawesome/css/all.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/icon_fallback.css') }}">
+    <script defer src="{{ url_for('static', filename='js/icon_fallback.js') }}"></script>
+
+    <style>
+        /* ==========================================================================
+           FinTrust — Analyst sign-in, freestyle pass.
+           Away from the dark data-console look: warm paper + a hand-placed
+           "evidence board" of the same financial signals (risk, savings,
+           obligations) as loose rotated cards instead of a grid dashboard.
+           Split screen — collage left, form right — stacks on mobile.
+           Functionality is untouched: every ID/class the script reads is
+           preserved exactly; only presentation changed.
+        ========================================================================== */
+        :root {
+            --paper: #fbf7ef;
+            --paper-2: #f3ecdd;
+            --ink: #191726;
+            --ink-soft: #4a4660;
+            --ink-faint: #948da8;
+
+            --indigo: #4338ca;
+            --indigo-deep: #2c1f6b;
+            --coral: #ff6b4a;
+            --lime: #b9e85a;
+            --sand: #f1e2c7;
+
+            --card-bg: #ffffff;
+            --border: rgba(25, 23, 38, 0.10);
+            --border-strong: rgba(25, 23, 38, 0.18);
+
+            --danger: #e0503a;
+            --success: #2f9e6a;
+
+            --font-display: 'Space Grotesk', 'Inter', sans-serif;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --font-marker: 'Caveat', cursive;
+
+            --ease: cubic-bezier(0.16, 1, 0.3, 1);
+            --radius: 16px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--paper);
+            color: var(--ink);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        a {
+            color: inherit;
+        }
+
+        :focus-visible {
+            outline: 2px solid var(--indigo);
+            outline-offset: 3px;
+            border-radius: 6px;
+        }
+
+        @keyframes rise {
+            from {
+                opacity: 0;
+                transform: translateY(14px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes drift {
+
+            0%,
+            100% {
+                transform: translate(0, 0) rotate(var(--r, 0deg));
+            }
+
+            50% {
+                transform: translate(0, -8px) rotate(var(--r, 0deg));
+            }
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Shell — split screen                                              */
+        /* ---------------------------------------------------------------- */
+
+        .shell {
+            display: grid;
+            grid-template-columns: 1.05fr 1fr;
+            min-height: 100vh;
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Left: the evidence board                                          */
+        /* ---------------------------------------------------------------- */
+
+        .board {
+            position: relative;
+            overflow: hidden;
+            background:
+                radial-gradient(ellipse 70% 55% at 20% 15%, rgba(255, 255, 255, 0.10), transparent 60%),
+                radial-gradient(ellipse 60% 50% at 85% 90%, rgba(185, 232, 90, 0.18), transparent 55%),
+                linear-gradient(150deg, var(--indigo-deep) 0%, var(--indigo) 55%, #5b3fd6 100%);
+            padding: 56px 52px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .board-blob {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(40px);
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .blob-1 {
+            width: 320px;
+            height: 320px;
+            background: var(--coral);
+            top: -80px;
+            right: -60px;
+            opacity: 0.35;
+        }
+
+        .blob-2 {
+            width: 260px;
+            height: 260px;
+            background: var(--lime);
+            bottom: -60px;
+            left: -60px;
+            opacity: 0.22;
+        }
+
+        .board-eyebrow {
+            font-family: var(--font-marker);
+            font-size: 1.35rem;
+            font-weight: 600;
+            color: var(--lime);
+            transform: rotate(-3deg);
+            display: inline-block;
+            width: fit-content;
+            margin-bottom: 18px;
+            opacity: 0;
+            animation: rise .7s var(--ease) .1s forwards;
+        }
+
+        .board h1 {
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: clamp(1.9rem, 3vw, 2.5rem);
+            line-height: 1.15;
+            letter-spacing: -0.01em;
+            color: #fff;
+            max-width: 440px;
+            margin-bottom: 16px;
+            opacity: 0;
+            animation: rise .7s var(--ease) .18s forwards;
+        }
+
+        .board h1 span {
+            text-decoration: underline;
+            text-decoration-color: var(--coral);
+            text-decoration-thickness: 4px;
+            text-underline-offset: 5px;
+        }
+
+        .board p {
+            font-size: 0.98rem;
+            line-height: 1.6;
+            color: rgba(255, 255, 255, 0.72);
+            max-width: 380px;
+            margin-bottom: 44px;
+            opacity: 0;
+            animation: rise .7s var(--ease) .24s forwards;
+        }
+
+        /* the collage of evidence chips */
+        .evidence {
+            position: relative;
+            flex: 1;
+            min-height: 260px;
+        }
+
+        .chip {
+            position: absolute;
+            background: #fff;
+            border-radius: 14px;
+            padding: 14px 16px;
+            box-shadow: 0 18px 40px rgba(20, 10, 60, 0.28);
+            width: 190px;
+            opacity: 0;
+            animation: rise .6s var(--ease) forwards, drift 6s ease-in-out infinite;
+            animation-delay: var(--d, 0s), var(--d, 0s);
+        }
+
+        .chip-label {
+            font-family: var(--font-sans);
+            font-size: 0.68rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            color: var(--ink-faint);
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .chip-value {
+            font-family: var(--font-display);
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--ink);
+        }
+
+        .chip-value.good {
+            color: var(--success);
+        }
+
+        .chip-value.watch {
+            color: var(--danger);
+        }
+
+        .chip-1 {
+            top: 4%;
+            left: 2%;
+            --r: -6deg;
+            --d: .35s;
+            transform: rotate(-6deg);
+        }
+
+        .chip-2 {
+            top: 2%;
+            right: 4%;
+            --r: 4deg;
+            --d: .5s;
+            transform: rotate(4deg);
+        }
+
+        .chip-3 {
+            bottom: 14%;
+            left: 12%;
+            --r: 3deg;
+            --d: .65s;
+            transform: rotate(3deg);
+        }
+
+        .chip-4 {
+            bottom: 2%;
+            right: 2%;
+            --r: -4deg;
+            --d: .8s;
+            transform: rotate(-4deg);
+        }
+
+        .chip-tape {
+            position: absolute;
+            top: -9px;
+            left: 50%;
+            transform: translateX(-50%) rotate(-2deg);
+            width: 44px;
+            height: 16px;
+            background: rgba(255, 255, 255, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.7);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .chip {
+                animation: none !important;
+                opacity: 1 !important;
+            }
+        }
+
+        @media (max-width: 980px) {
+            .shell {
+                grid-template-columns: 1fr;
+            }
+
+            .board {
+                padding: 40px 28px 90px;
+            }
+
+            .evidence {
+                min-height: 220px;
+            }
+
+            .chip {
+                width: 150px;
+                padding: 11px 13px;
+            }
+        }
+
+        @media (max-width: 620px) {
+            .board {
+                display: none;
+            }
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Right: the form                                                   */
+        /* ---------------------------------------------------------------- */
+
+        .formside {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px 28px;
+            background: var(--paper);
+        }
+
+        .wrap {
+            width: 100%;
+            max-width: 380px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 34px;
+            opacity: 0;
+            animation: rise .6s var(--ease) .05s forwards;
+        }
+
+        .brand-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            background: var(--ink);
+            color: var(--lime);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.95rem;
+            transform: rotate(-4deg);
+        }
+
+        .brand-name {
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 1.12rem;
+            letter-spacing: -0.01em;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: 0 24px 60px rgba(25, 23, 38, 0.08);
+            padding: 34px 30px 28px;
+            opacity: 0;
+            animation: rise .65s var(--ease) .15s forwards;
+        }
+
+        .card-title {
+            font-family: var(--font-display);
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            margin-bottom: 6px;
+        }
+
+        .card-tagline {
+            font-size: 0.87rem;
+            color: var(--ink-soft);
+            margin-bottom: 26px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        .input-label {
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--ink-soft);
+            margin-bottom: 7px;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        .input-field {
+            width: 100%;
+            background: #fbfaf7;
+            border: 1.5px solid var(--border-strong);
+            border-radius: 11px;
+            color: var(--ink);
+            font-family: inherit;
+            font-size: 0.95rem;
+            padding: 12px 42px 12px 14px;
+            outline: none;
+            transition: border-color .18s ease, background .18s ease, box-shadow .18s ease;
+        }
+
+        .input-field::placeholder {
+            color: var(--ink-faint);
+        }
+
+        .input-field:hover {
+            border-color: var(--ink-faint);
+        }
+
+        .input-field:focus {
+            border-color: var(--indigo);
+            background: #fff;
+            box-shadow: 0 0 0 4px rgba(67, 56, 202, 0.12);
+        }
+
+        .input-icon {
+            position: absolute;
+            right: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--ink-faint);
+            font-size: 0.85rem;
+            pointer-events: none;
+            transition: color .15s ease;
+        }
+
+        .input-field:focus~.input-icon {
+            color: var(--indigo);
+        }
+
+        .password-toggle {
+            pointer-events: all;
+            cursor: pointer;
+        }
+
+        .password-toggle:hover {
+            color: var(--ink-soft);
+        }
+
+        .error-msg {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.78rem;
+            color: var(--danger);
+            margin-top: 7px;
+        }
+
+        .form-group.error .error-msg {
+            display: flex;
+        }
+
+        .form-group.error .input-field {
+            border-color: var(--danger);
+        }
+
+        .form-group.error .input-field:focus {
+            box-shadow: 0 0 0 4px rgba(224, 80, 58, 0.14);
+        }
+
+        .btn-primary {
+            width: 100%;
+            background: var(--ink);
+            color: var(--lime);
+            border: none;
+            border-radius: 11px;
+            font-family: var(--font-display);
+            font-size: 0.95rem;
+            font-weight: 700;
+            padding: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 6px;
+            transition: transform .18s var(--ease), background .18s ease;
+        }
+
+        .btn-primary:hover {
+            background: var(--indigo-deep);
+            transform: translateY(-1px);
+        }
+
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(185, 232, 90, 0.4);
+            border-top-color: var(--lime);
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .footnote {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 22px;
+            font-size: 0.76rem;
+            color: var(--ink-faint);
+        }
+
+        .footnote i {
+            color: var(--indigo);
+        }
+
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 20px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--ink-soft);
+            text-decoration: none;
+            transition: color .15s ease;
+            opacity: 0;
+            animation: rise .6s var(--ease) .3s forwards;
+        }
+
+        .back-link:hover {
+            color: var(--indigo);
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Toast                                                             */
+        /* ---------------------------------------------------------------- */
+
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #fff;
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--indigo);
+            border-radius: 12px;
+            padding: 13px 17px;
+            font-size: 0.85rem;
+            box-shadow: 0 24px 60px rgba(25, 23, 38, 0.16);
+            display: none;
+            max-width: 320px;
+            z-index: 100;
+        }
+
+        .toast.show {
+            display: block;
+            animation: rise .3s var(--ease) forwards;
+        }
+
+        .toast.error {
+            border-left-color: var(--danger);
+        }
+
+        .toast-title {
+            font-family: var(--font-display);
+            font-weight: 700;
+            margin-bottom: 2px;
+            color: var(--ink);
+        }
+
+        .toast-msg {
+            color: var(--ink-soft);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            .brand,
+            .card,
+            .back-link,
+            .toast.show,
+            .board-eyebrow,
+            .board h1,
+            .board p {
+                animation: none !important;
+                opacity: 1 !important;
+                transform: none !important;
+            }
+
+            .btn-primary:hover {
+                transform: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="shell">
+
+        <!-- ============ LEFT: evidence board ============ -->
+        <aside class="board" aria-hidden="true">
+            <div class="board-blob blob-1"></div>
+            <div class="board-blob blob-2"></div>
+
+            <span class="board-eyebrow">the reasoning's right here ✦</span>
+            <h1>Every risk score comes with <span>its receipts.</span></h1>
+            <p>No black box. Income, savings, obligations and behaviour — laid out so you can decide with your eyes
+                open.</p>
+
+            <div class="evidence">
+                <div class="chip chip-1">
+                    <div class="chip-tape"></div>
+                    <div class="chip-label"><i class="fa-solid fa-arrow-trend-down"></i> Risk score</div>
+                    <div class="chip-value good">12%</div>
+                </div>
+                <div class="chip chip-2">
+                    <div class="chip-tape"></div>
+                    <div class="chip-label"><i class="fa-solid fa-piggy-bank"></i> Savings behaviour</div>
+                    <div class="chip-value good">Strong</div>
+                </div>
+                <div class="chip chip-3">
+                    <div class="chip-tape"></div>
+                    <div class="chip-label"><i class="fa-solid fa-triangle-exclamation"></i> Obligations</div>
+                    <div class="chip-value watch">Elevated</div>
+                </div>
+                <div class="chip chip-4">
+                    <div class="chip-tape"></div>
+                    <div class="chip-label"><i class="fa-solid fa-scale-balanced"></i> Affordability</div>
+                    <div class="chip-value good">Comfortable</div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ============ RIGHT: form ============ -->
+        <div class="formside">
+            <div class="wrap">
+                <div class="brand">
+                    <div class="brand-icon"><i class="fa-solid fa-building-columns"></i></div>
+                    <span class="brand-name">FinTrust</span>
+                </div>
+
+                <div class="card">
+                    <h1 class="card-title">Sign in to Institution Workspace</h1>
+                    <p class="card-tagline">Authorized access for lending intelligence, risk analysis, and FraudShield.</p>
+
+                    <form id="lenderLoginForm" novalidate>
+                        <div class="form-group">
+                            <label class="input-label" for="lenderEmail">Email</label>
+                            <div class="input-wrapper">
+                                <input type="email" id="lenderEmail" class="input-field" autocomplete="email" required>
+                                <i class="fa-solid fa-envelope input-icon" aria-hidden="true"></i>
+                            </div>
+                            <span class="error-msg" role="alert"><i class="fa-solid fa-circle-exclamation"></i><span
+                                    class="error-text"></span></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="input-label" for="lenderPassword">Password</label>
+                            <div class="input-wrapper">
+                                <input type="password" id="lenderPassword" class="input-field"
+                                    autocomplete="current-password" required>
+                                <i class="fa-solid fa-eye-slash input-icon password-toggle" data-target="lenderPassword"
+                                    role="button" tabindex="0" aria-label="Toggle password visibility"></i>
+                            </div>
+                            <span class="error-msg" role="alert"><i class="fa-solid fa-circle-exclamation"></i><span
+                                    class="error-text"></span></span>
+                        </div>
+
+                        <button type="submit" class="btn-primary" id="lenderLoginBtn">
+                            <i class="fa-solid fa-arrow-right-to-bracket"></i> Sign In
+                        </button>
+                    </form>
+
+                    <div id="twoFactorPanel" hidden style="margin-top:18px;">
+                        <div id="twoFactorSetup" hidden style="margin-bottom:16px;padding:14px;border:1px solid rgba(67,56,202,.18);border-radius:12px;background:rgba(67,56,202,.05);">
+                            <div style="font-weight:700;margin-bottom:6px;">Set up two-factor authentication</div>
+                            <div style="font-size:.82rem;line-height:1.5;margin-bottom:12px;">Open Google Authenticator, Microsoft Authenticator, Authy, or another TOTP app and scan this QR code. Then enter the 6-digit code it generates.</div>
+                            <div id="twoFactorQr" style="display:flex;justify-content:center;align-items:center;min-height:196px;padding:8px;background:#fff;border-radius:12px;border:1px solid rgba(15,23,42,.10);"></div>
+                            <div id="twoFactorQrError" hidden style="font-size:.8rem;line-height:1.45;margin-top:10px;padding:10px;border-radius:8px;background:#fff7ed;color:#9a3412;">QR code could not be generated. Use this manual setup key instead: <code id="twoFactorSecret" style="user-select:all;word-break:break-all;"></code></div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="input-label" for="twoFactorCode">Authenticator code</label>
+                            <div class="input-wrapper">
+                                <input type="text" id="twoFactorCode" class="input-field" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="123456">
+                                <i class="fa-solid fa-shield-halved input-icon" aria-hidden="true"></i>
+                            </div>
+                            <span class="error-msg" role="alert"><i class="fa-solid fa-circle-exclamation"></i><span class="error-text"></span></span>
+                        </div>
+
+                        <button type="button" class="btn-primary" id="twoFactorVerifyBtn">
+                            <i class="fa-solid fa-lock"></i> Verify & Continue
+                        </button>
+                        <button type="button" id="twoFactorCancelBtn" style="width:100%;margin-top:10px;border:0;background:transparent;padding:10px;cursor:pointer;font-weight:600;opacity:.72;">Cancel and sign in again</button>
+                    </div>
+
+                    <div class="footnote"><i class="fa-solid fa-shield-halved"></i> Authorized institutional access
+                    </div>
+                </div>
+
+                <a href="/login" class="back-link">&larr; Back to consumer sign in</a>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="toast" id="toast">
+        <div class="toast-title" id="toastTitle"></div>
+        <div class="toast-msg" id="toastMsg"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script>
+        'use strict';
+
+        function isValidEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
+
+        function showError(input, msg) {
+            const group = input.closest('.form-group');
+            group.classList.add('error');
+            group.querySelector('.error-text').textContent = msg;
+        }
+        function clearErrors(form) {
+            form.querySelectorAll('.form-group').forEach(g => g.classList.remove('error'));
+        }
+
+        function showToast(type, title, message, duration = 4200) {
+            const toast = document.getElementById('toast');
+            toast.className = 'toast show' + (type === 'error' ? ' error' : '');
+            document.getElementById('toastTitle').textContent = title;
+            document.getElementById('toastMsg').textContent = message;
+            clearTimeout(showToast._t);
+            showToast._t = setTimeout(() => toast.classList.remove('show'), duration);
+        }
+
+        document.querySelectorAll('.password-toggle').forEach(icon => {
+            icon.addEventListener('click', () => {
+                const target = document.getElementById(icon.dataset.target);
+                const show = target.type === 'password';
+                target.type = show ? 'text' : 'password';
+                icon.classList.toggle('fa-eye', show);
+                icon.classList.toggle('fa-eye-slash', !show);
+            });
+        });
+
+        const form = document.getElementById('lenderLoginForm');
+        let submitting = false;
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (submitting) return;
+            clearErrors(form);
+
+            const emailInput = document.getElementById('lenderEmail');
+            const passInput = document.getElementById('lenderPassword');
+            let valid = true;
+            if (!isValidEmail(emailInput.value.trim())) { showError(emailInput, 'Please enter a valid email address'); valid = false; }
+            if (!passInput.value) { showError(passInput, 'Password is required'); valid = false; }
+            if (!valid) return;
+
+            submitting = true;
+            const btn = document.getElementById('lenderLoginBtn');
+            const orig = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Signing in…';
+
+            try {
+                const res = await fetch('/lender/do-login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ email: emailInput.value.trim(), password: passInput.value })
+                });
+                const data = await res.json();
+
+                if (res.ok && data.success && data.requires_2fa) {
+                    form.hidden = true;
+                    const panel = document.getElementById('twoFactorPanel');
+                    panel.hidden = false;
+                    const setup = document.getElementById('twoFactorSetup');
+                    if (data.setup_required) {
+                        setup.hidden = false;
+                        const qrBox = document.getElementById('twoFactorQr');
+                        const qrError = document.getElementById('twoFactorQrError');
+                        const secretEl = document.getElementById('twoFactorSecret');
+                        qrBox.innerHTML = '';
+                        qrError.hidden = true;
+                        secretEl.textContent = data.secret || '';
+                        try {
+                            if (!data.provisioning_uri || typeof QRCode === 'undefined') throw new Error('QR generator unavailable');
+                            new QRCode(qrBox, {
+                                text: data.provisioning_uri,
+                                width: 180,
+                                height: 180,
+                                correctLevel: QRCode.CorrectLevel.M
+                            });
+                        } catch (qrErr) {
+                            qrBox.innerHTML = '<span style="font-size:.82rem;opacity:.65;">QR unavailable</span>';
+                            qrError.hidden = false;
+                        }
+                        showToast('success', 'Authenticator setup required', 'Scan the QR code, then verify the 6-digit code from your authenticator app.');
+                    } else {
+                        setup.hidden = true;
+                        showToast('success', 'Password verified', 'Enter the 6-digit code from your authenticator app.');
+                    }
+                    setTimeout(() => document.getElementById('twoFactorCode').focus(), 50);
+                } else if (res.ok && data.success) {
+                    window.location.href = data.redirect || '/lender/workspace';
+                } else if (res.status === 403) {
+                    showToast('error', 'Not authorized', data.message || 'This account is not authorized for analyst access.');
+                } else {
+                    showToast('error', 'Sign in failed', data.message || 'Invalid email or password.');
+                }
+            } catch (err) {
+                showToast('error', 'Network error', 'Unable to connect. Please check your connection.');
+            } finally {
+                submitting = false;
+                btn.disabled = false;
+                btn.innerHTML = orig;
+            }
+        });
+
+
+        const twoFactorVerifyBtn = document.getElementById('twoFactorVerifyBtn');
+        const twoFactorCode = document.getElementById('twoFactorCode');
+
+        async function verifyTwoFactor() {
+            const code = twoFactorCode.value.replace(/\D/g, '');
+            clearErrors(document.getElementById('twoFactorPanel'));
+            if (code.length !== 6) {
+                showError(twoFactorCode, 'Enter the 6-digit authenticator code');
+                return;
+            }
+            twoFactorVerifyBtn.disabled = true;
+            const original = twoFactorVerifyBtn.innerHTML;
+            twoFactorVerifyBtn.innerHTML = '<span class="spinner"></span> Verifying…';
+            try {
+                const res = await fetch('/auth/2fa/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ code })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showToast('success', 'Two-factor verified', 'Opening secure workspace…');
+                    setTimeout(() => { window.location.href = data.redirect || '/lender/workspace'; }, 500);
+                    return;
+                }
+                showToast('error', 'Verification failed', data.message || 'Invalid authenticator code.');
+                twoFactorCode.select();
+            } catch (err) {
+                showToast('error', 'Network error', 'Unable to verify the authenticator code.');
+            } finally {
+                twoFactorVerifyBtn.disabled = false;
+                twoFactorVerifyBtn.innerHTML = original;
+            }
+        }
+
+        twoFactorVerifyBtn.addEventListener('click', verifyTwoFactor);
+        twoFactorCode.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); verifyTwoFactor(); }
+        });
+        twoFactorCode.addEventListener('input', () => {
+            twoFactorCode.value = twoFactorCode.value.replace(/\D/g, '').slice(0, 6);
+        });
+        document.getElementById('twoFactorCancelBtn').addEventListener('click', async () => {
+            try { await fetch('/auth/2fa/cancel', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
+            window.location.reload();
+        });
+
+    </script>
+
+</body>
+
+</html>

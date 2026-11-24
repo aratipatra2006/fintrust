@@ -1,0 +1,1439 @@
+# routes/lender.py
+
+"""
+Page + API routes for the lender/analyst workspace.
+
+PHASE 0: page routes only (lender_login_page, lender_workspace_page).
+PHASE 2: the lender-side application queue (read-only).
+PHASE 3 (this update): running the existing credit-risk assessment
+against a queued application's own stored data.
+
+This module does not implement Credit Assessment itself — no model,
+preprocessing, feature encoding, threshold, decision-policy, SHAP,
+anomaly, scenario, or fairness code lives here. It calls the existing
+services.credit_risk_service.assess_credit_risk() wrapper, which is
+the same verified path used by POST /api/credit-risk/assess in
+credit_risk.py (unchanged, untouched).
+
+OWNERSHIP / AUTHORIZATION:
+The lender identity for every query below comes exclusively from
+session["user_id"] (set at login, re-validated as an active lender on
+every request by @lender_required). It is never accepted from the
+frontend. Every query filters `lender_id = session["user_id"]` at the
+SQL level, so a request for another lender's application simply
+matches zero rows and falls through to the same 404 used for a
+nonexistent id — no separate "forbidden, but it does exist" branch
+that would leak which application ids are in use.
+
+BORROWER IDENTITY:
+The applicant shown in the queue/detail views is resolved from
+loan_applications.borrower_id, joined against users — never from the
+lender's own session["user_id"]. The signed-in lender is always the
+reviewer, never the applicant.
+
+Registration (add to app.py, alongside the other blueprints):
+
+    from routes.lender import lender_bp
+    app.register_blueprint(lender_bp)
+"""
+
+import json
+import os
+from collections import Counter
+
+from flask import Blueprint, render_template, session, jsonify, abort, request
+
+from utils.decorators import lender_required
+from utils.db import get_db
+from services.credit_risk_service import (
+    assess_credit_risk,
+    explain_credit_risk,
+    analyze_credit_scenario,
+    check_credit_anomaly,
+)
+from services.financial_behavior_service import get_financial_behavior_profile
+from services.affordability_service import calculate_affordability
+from services.risk_assistant_service import answer_risk_assistant_question
+
+# Scenario Analysis (PHASE 7) may only vary these fields for a stored
+# application. Anything else in the request body is ignored — the
+# client can never use this endpoint to replace the baseline applicant
+# payload itself, only nudge these four values away from what's
+# actually stored in loan_applications.application_data.
+SCENARIO_ALLOWED_FIELDS = {
+    "duration_months",
+    "credit_amount",
+    "installment_rate",
+    "existing_credits",
+}
+
+lender_bp = Blueprint("lender", __name__)
+
+MODEL_VERSION = os.getenv("FINTRUST_CREDIT_MODEL_VERSION", "Credit Risk Model v2")
+
+
+def _audit_event(conn, *, lender_id, application_id, borrower_id, event_type, assessment=None, lender_decision=None, reasons=None, metadata=None):
+    """Append an immutable lender-governance event after the authoritative action succeeds."""
+    assessment = assessment or {}
+    conn.execute(
+        """
+        INSERT INTO lender_decision_audit
+            (lender_id, application_id, borrower_id, event_type, model_version,
+             risk_probability, risk_level, ai_decision, lender_decision, reason_summary, metadata)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            lender_id, application_id, borrower_id, event_type, MODEL_VERSION,
+            assessment.get("risk_probability"), assessment.get("risk_level"),
+            assessment.get("decision"), lender_decision,
+            json.dumps(reasons or []), json.dumps(metadata or {}),
+        ),
+    )
+
+
+def _assessment_reasons(assessment):
+    """Keep audit reasons factual: model output and explicit SHAP factors only."""
+    reasons = []
+    explanation = assessment.get("explanation") if isinstance(assessment, dict) else None
+    if isinstance(explanation, dict):
+        reasons.extend([f"Risk-increasing: {x}" for x in (explanation.get("risk_increasing_factors") or [])[:5]])
+        reasons.extend([f"Risk-reducing: {x}" for x in (explanation.get("risk_reducing_factors") or [])[:5]])
+    if not reasons and isinstance(assessment, dict):
+        if assessment.get("risk_level"):
+            reasons.append(f"Model risk level: {assessment['risk_level']}")
+        if assessment.get("decision"):
+            reasons.append(f"Model decision: {assessment['decision']}")
+    return reasons
+
+
+# ---------------------------------------------------------------------
+# Code -> human-readable label maps for the 20-field application schema
+# (public.loan_applications.application_data). These mirror the exact
+# option labels already used in the borrower/lender assessment forms
+# (loan_application.html / lender_workspace.html) so the queue and the
+# manual assessment form never disagree on what a code means.
+# ---------------------------------------------------------------------
+
+PURPOSE_LABELS = {
+    "A40": "Car (new)", "A41": "Car (used)", "A42": "Furniture / equipment",
+    "A43": "Radio / television", "A44": "Domestic appliances", "A45": "Repairs",
+    "A46": "Education", "A48": "Retraining", "A49": "Business", "A410": "Other",
+}
+CHECKING_ACCOUNT_LABELS = {
+    "A11": "Overdrawn", "A12": "Low balance", "A13": "Adequate balance",
+    "A14": "No checking account",
+}
+CREDIT_HISTORY_LABELS = {
+    "A30": "No credit taken previously", "A31": "All previous credit paid on time",
+    "A32": "Existing credit paid on time so far", "A33": "Repayment delays in the past",
+    "A34": "Critical credit history",
+}
+OTHER_INSTALLMENT_LABELS = {"A141": "Bank", "A142": "Retail / store financing", "A143": "None"}
+SAVINGS_LABELS = {
+    "A61": "Minimal savings", "A62": "Low savings balance", "A63": "Moderate savings balance",
+    "A64": "High savings balance", "A65": "No savings account / unknown",
+}
+EMPLOYMENT_LABELS = {
+    "A71": "Unemployed", "A72": "Less than 1 year", "A73": "1 – 4 years",
+    "A74": "4 – 7 years", "A75": "7+ years",
+}
+JOB_LABELS = {
+    "A171": "Unemployed / unskilled, non-resident", "A172": "Unskilled, resident",
+    "A173": "Skilled employee / official", "A174": "Management / self-employed / highly qualified",
+}
+HOUSING_LABELS = {"A151": "Rent", "A152": "Own", "A153": "For free"}
+PROPERTY_LABELS = {
+    "A121": "Real estate", "A122": "Building society savings / life insurance",
+    "A123": "Car or other", "A124": "Unknown / no property",
+}
+PERSONAL_STATUS_LABELS = {
+    "A91": "Male : divorced / separated", "A92": "Female : divorced / separated / married",
+    "A93": "Male : single", "A94": "Male : married / widowed", "A95": "Female : single",
+}
+TELEPHONE_LABELS = {"A191": "None", "A192": "Yes, under applicant's name"}
+FOREIGN_WORKER_LABELS = {"A201": "Yes", "A202": "No"}
+OTHER_DEBTORS_LABELS = {"A101": "None", "A102": "Co-applicant", "A103": "Guarantor"}
+INSTALLMENT_RATE_LABELS = {
+    "1": "Low (~1 band)", "2": "Moderate (~2 band)", "3": "High (~3 band)", "4": "Very high (~4 band)",
+}
+
+# (application_data key, display label, optional code->label map)
+# Covers all 20 fields in loan_application.py::APPLICATION_FIELDS.
+FIELD_DISPLAY = [
+    ("checking_account", "Checking Account", CHECKING_ACCOUNT_LABELS),
+    ("credit_history", "Credit History", CREDIT_HISTORY_LABELS),
+    ("existing_credits", "Existing Credit Lines (this lender)", None),
+    ("other_installment_plans", "Other Installment Plans", OTHER_INSTALLMENT_LABELS),
+    ("savings_account", "Savings", SAVINGS_LABELS),
+    ("employment_since", "Employment Duration", EMPLOYMENT_LABELS),
+    ("job", "Job Type", JOB_LABELS),
+    ("residence_since", "Residence Duration (years)", None),
+    ("housing", "Housing", HOUSING_LABELS),
+    ("property", "Property", PROPERTY_LABELS),
+    ("age", "Age", None),
+    ("personal_status_sex", "Applicant Personal Status", PERSONAL_STATUS_LABELS),
+    ("dependents", "Number of Dependents", None),
+    ("telephone", "Registered Telephone", TELEPHONE_LABELS),
+    ("foreign_worker", "Foreign Worker Status", FOREIGN_WORKER_LABELS),
+    ("other_debtors", "Other Debtors / Guarantors", OTHER_DEBTORS_LABELS),
+    ("installment_rate", "Installment Commitment", INSTALLMENT_RATE_LABELS),
+    ("duration_months", "Loan Tenure (months)", None),
+    ("credit_amount", "Loan Amount", None),
+    ("purpose", "Purpose", PURPOSE_LABELS),
+]
+
+
+def _parse_application_data(raw):
+    """application_data is jsonb; normalize whether the driver already
+    deserialized it to a dict or returned the raw JSON text."""
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw or {}
+
+
+def _parse_jsonb(raw):
+    """Same jsonb normalization as _parse_application_data, but for
+    nullable jsonb columns (e.g. assessment_result) where "not present"
+    must stay None rather than becoming a fabricated {}."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
+
+
+def _humanize_fields(application_data):
+    """Renders every one of the 20 submitted fields as a human-readable
+    {label, value} row, in the fixed order above. Never includes risk
+    score, SHAP, anomaly, or any other model output — this only ever
+    sees the raw submitted application_data."""
+    rows = []
+    for key, label, label_map in FIELD_DISPLAY:
+        raw_value = application_data.get(key)
+        if label_map is not None:
+            value = label_map.get(str(raw_value), raw_value)
+        else:
+            value = raw_value
+        rows.append({"label": label, "value": value if value not in (None, "") else "—"})
+    return rows
+
+
+@lender_bp.route("/lender/login", methods=["GET"])
+def lender_login_page():
+    """
+    Public page — the lender/analyst sign-in screen. Distinct from the
+    consumer /login page. Submits credentials to POST /lender/do-login
+    (see auth.py), which is the only place role is actually checked.
+    """
+    return render_template("lender_login.html")
+
+
+@lender_bp.route("/lender/workspace", methods=["GET"])
+@lender_required
+def lender_workspace_page():
+    """
+    Authenticated lender landing page. As of PHASE 2, the page's
+    default (landing) view inside this template is the pending
+    application queue rather than the manual assessment form — see
+    lender_workspace.js / lender_workspace.html.
+    """
+    return render_template("lender_workspace.html")
+
+
+# ---------------------------------------------------------------------
+# PHASE 2 — lender application queue (read-only)
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/applications", methods=["GET"])
+@lender_required
+def list_lender_applications():
+    """
+    Returns this lender's PENDING applications only.
+
+    Authorization: lender_id is taken from session["user_id"] (set by
+    @lender_required from the DB-backed session), never from the
+    request. The WHERE clause below is the entire ownership boundary.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT la.id, la.application_data, la.status, la.created_at,
+                   la.assessment_result,
+                   u.name AS borrower_name
+            FROM loan_applications la
+            JOIN users u ON u.id = la.borrower_id
+            WHERE la.lender_id = %s AND la.status = 'PENDING'
+            ORDER BY la.created_at DESC
+            """,
+            (lender_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    applications = []
+    for row in rows:
+        data = _parse_application_data(row["application_data"])
+        assessment_result = _parse_jsonb(row["assessment_result"])
+        applications.append({
+            "application_id": row["id"],
+            "applicant_name": row["borrower_name"],
+            "requested_amount": data.get("credit_amount"),
+            "purpose": PURPOSE_LABELS.get(data.get("purpose"), data.get("purpose")),
+            "submitted_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "status": row["status"],
+            # Compact, persisted-only assessment state for the queue list.
+            # No recomputation — straight from assessment_result, or None
+            # if the model hasn't been run for this application yet.
+            "assessed": assessment_result is not None,
+            "decision": assessment_result.get("decision") if assessment_result else None,
+        })
+
+    return jsonify({"status": "success", "applications": applications})
+
+
+@lender_bp.route("/lender/applications/<int:application_id>", methods=["GET"])
+@lender_required
+def get_lender_application(application_id):
+    """
+    Returns a single application's read-only details for review.
+
+    Ownership is enforced in the SQL itself (`lender_id = %s`): an
+    application that exists but belongs to another lender matches zero
+    rows here, and gets the exact same 404 as an id that doesn't exist
+    at all — so this endpoint never confirms or denies another
+    lender's application ids.
+
+    Returns application/borrower fields plus the persisted core AI
+    assessment (assessment_result / assessed_at), if one exists. No
+    SHAP, anomaly, scenario, or fairness output is returned here — that
+    logic doesn't run here and isn't persisted or in scope for this
+    phase. The model is never rerun on this GET; assessment_result is
+    whatever was last saved by POST /assess, unchanged.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, borrower_id, application_data, status, created_at,
+                   assessment_result, assessed_at
+            FROM loan_applications
+            WHERE id = %s AND lender_id = %s
+            """,
+            (application_id, lender_id),
+        ).fetchone()
+
+        if not row:
+            abort(404)
+
+        # Borrower identity always comes from application.borrower_id —
+        # never from the lender's own session — per Phase 2 spec.
+        borrower = conn.execute(
+            "SELECT id, name, email FROM users WHERE id=%s",
+            (row["borrower_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    data = _parse_application_data(row["application_data"])
+
+    application = {
+        "application_id": row["id"],
+        "status": row["status"],
+        "submitted_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "borrower": {
+            "id": borrower["id"] if borrower else row["borrower_id"],
+            "name": borrower["name"] if borrower else None,
+            "email": borrower["email"] if borrower else None,
+        },
+        "loan_amount": data.get("credit_amount"),
+        "tenure_months": data.get("duration_months"),
+        "purpose": PURPOSE_LABELS.get(data.get("purpose"), data.get("purpose")),
+        "fields": _humanize_fields(data),
+        # Raw numeric baseline for the Scenario Analysis controls
+        # (PHASE 7) — the same four fields SCENARIO_ALLOWED_FIELDS lets
+        # a scenario vary. Plain numbers, not display-humanized, since
+        # they seed editable number inputs rather than a read-only
+        # table.
+        "scenario_baseline": {
+            "duration_months": data.get("duration_months"),
+            "credit_amount": data.get("credit_amount"),
+            "installment_rate": data.get("installment_rate"),
+            "existing_credits": data.get("existing_credits"),
+        },
+        # Persisted core AI assessment (Phase 3.5), if this application
+        # has one. None if the model hasn't been run yet — the frontend
+        # must show the "not yet assessed" empty state in that case, not
+        # rerun the model automatically.
+        "assessment_result": _parse_jsonb(row["assessment_result"]),
+        "assessed_at": row["assessed_at"].isoformat() if row["assessed_at"] else None,
+    }
+
+    return jsonify({"status": "success", "application": application})
+
+
+# ---------------------------------------------------------------------
+# PHASE 3 — run the existing credit-risk assessment against the
+# application's own stored data (no manual re-entry, no new ML logic).
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/applications/<int:application_id>/assess", methods=["POST"])
+@lender_required
+def assess_lender_application(application_id):
+    """
+    Runs the verified credit-risk assessment for one application.
+
+    Source of truth: the application's own stored application_data —
+    never anything supplied in this request. The frontend only sends
+    which application_id to assess.
+
+    Ownership: same pattern as get_lender_application — the SQL filter
+    `lender_id = session["user_id"]` is the entire authorization check.
+    An application belonging to another lender matches zero rows and
+    gets a 404, identical to a nonexistent id.
+
+    Delegates entirely to services.credit_risk_service.assess_credit_risk,
+    which is the same verified path used by the existing
+    POST /api/credit-risk/assess endpoint. No model, preprocessing,
+    threshold, or decision-policy code lives here or is duplicated.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, borrower_id, application_data FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    applicant = _parse_application_data(row["application_data"])
+
+    result = assess_credit_risk(applicant)
+
+    if not isinstance(result, dict) or result.get("status") != "success":
+        # Pass the service's own error through verbatim rather than
+        # inventing a message — this is still the backend's verdict,
+        # just an error one.
+        error_payload = result if isinstance(result, dict) else {
+            "status": "error",
+            "message": "Assessment failed. Please try again.",
+        }
+        error_payload.setdefault("application_id", row["id"])
+        return jsonify(error_payload), 422
+
+    # ---------------------------------------------------------------
+    # PHASE 3.5 — persist the core assessment against this application.
+    #
+    # Only the fields needed to reconstruct the assessment UI are
+    # stored (risk_probability, risk_percentage, risk_level, decision).
+    # Nothing is duplicated or fabricated: whatever keys the service
+    # didn't return simply aren't stored. SHAP/anomaly/scenario/
+    # fairness data is not persisted here — out of scope this phase.
+    # ---------------------------------------------------------------
+    assessment_to_store = {
+        key: result[key]
+        for key in ("risk_probability", "risk_percentage", "risk_level", "decision")
+        if key in result
+    }
+
+    conn = get_db()
+    try:
+        persisted = conn.execute(
+            """
+            UPDATE loan_applications
+            SET assessment_result = %s, assessed_at = now(), updated_at = now()
+            WHERE id = %s AND lender_id = %s
+            RETURNING assessed_at
+            """,
+            (json.dumps(assessment_to_store), row["id"], lender_id),
+        ).fetchone()
+        _audit_event(
+            conn,
+            lender_id=lender_id,
+            application_id=row["id"],
+            borrower_id=row["borrower_id"],
+            event_type="ASSESSMENT",
+            assessment=assessment_to_store,
+            reasons=_assessment_reasons(result),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        persisted = None
+    finally:
+        conn.close()
+
+    # Return the assessment result verbatim, plus which application it's
+    # for. No recomputation or reinterpretation of risk_probability,
+    # risk_percentage, risk_level, or decision happens here.
+    response_payload = dict(result)
+    response_payload["application_id"] = row["id"]
+    response_payload["assessed_at"] = persisted["assessed_at"].isoformat() if persisted else None
+    return jsonify(response_payload)
+
+
+# ---------------------------------------------------------------------
+# PHASE 4 — decision explanation for the currently selected application.
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/applications/<int:application_id>/explain", methods=["POST"])
+@lender_required
+def explain_lender_application(application_id):
+    """
+    Returns the SHAP-based decision explanation (risk-increasing /
+    risk-reducing factors) for one application.
+
+    Source of truth: the application's own stored application_data —
+    never anything supplied in this request. The frontend only sends
+    which application_id to explain.
+
+    Ownership: same pattern as assess_lender_application — the SQL
+    filter `lender_id = session["user_id"]` is the entire authorization
+    check. An application belonging to another lender matches zero
+    rows and gets a 404, identical to a nonexistent id — so this
+    endpoint never confirms or denies another lender's application ids.
+
+    Delegates entirely to services.credit_risk_service.explain_credit_risk,
+    which reuses the existing verified SHAP explanation path. No SHAP,
+    model, preprocessing, threshold, or decision-policy code lives here
+    or is duplicated.
+
+    Not persisted this phase (per the Phase 4 brief) — recomputed from
+    the stored application_data on every call.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, borrower_id, application_data FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    applicant = _parse_application_data(row["application_data"])
+
+    result = explain_credit_risk(applicant)
+
+    if not isinstance(result, dict) or result.get("status") != "success":
+        # Pass the service's own error through verbatim rather than
+        # inventing a message.
+        error_payload = result if isinstance(result, dict) else {
+            "status": "error",
+            "message": "Decision explanation is currently unavailable.",
+        }
+        error_payload.setdefault("application_id", row["id"])
+        return jsonify(error_payload), 422
+
+    # Return the explanation verbatim, plus which application it's for.
+    # No recomputation or reinterpretation of the SHAP factors happens
+    # here.
+    response_payload = dict(result)
+    response_payload["application_id"] = row["id"]
+
+    # Scenario is exploratory but still traceable; record only requested changes and result summary.
+    conn = get_db()
+    try:
+        _audit_event(
+            conn,
+            lender_id=lender_id,
+            application_id=row["id"],
+            borrower_id=row["borrower_id"],
+            event_type="SCENARIO",
+            assessment={
+                "risk_probability": result.get("scenario_probability") or result.get("probability"),
+                "risk_level": result.get("scenario_risk_level"),
+                "decision": result.get("scenario_decision"),
+            },
+            metadata={"changes": changes, "baseline": result.get("baseline"), "scenario": result.get("scenario")},
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        # Exploratory audit failure must not turn a valid scenario into a 500.
+    finally:
+        conn.close()
+
+    return jsonify(response_payload)
+
+
+# ---------------------------------------------------------------------
+# PHASE 5 — borrower evidence + repayment capacity for the currently
+# selected application.
+#
+# CRITICAL: loan_applications.borrower_id is the ONLY source of
+# borrower identity below. session["user_id"] identifies the signed-in
+# lender (the reviewer) and is used exclusively for the ownership
+# filter — it is never passed to the financial-behavior or
+# affordability services as the subject.
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/applications/<int:application_id>/borrower-evidence", methods=["GET"])
+@lender_required
+def borrower_evidence_lender_application(application_id):
+    """
+    Returns the linked borrower's financial-behavior profile for
+    underwriting review.
+
+    Ownership: `lender_id = session["user_id"]` in the SQL filter is
+    the entire authorization check — an application belonging to
+    another lender matches zero rows and gets a 404, identical to a
+    nonexistent id.
+
+    Borrower identity: resolved exclusively from
+    loan_applications.borrower_id on this row. The lender's own
+    session["user_id"] is never used as the borrower.
+
+    Delegates entirely to
+    services.financial_behavior_service.get_financial_behavior_profile,
+    which already takes an explicit user_id — no changes to that
+    service were needed or made. Whether the borrower has enough
+    history to be useful is a data_coverage question the frontend
+    decides on; this endpoint never fabricates figures or falls back
+    to the lender's own transactions.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, borrower_id FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    borrower_id = row["borrower_id"]
+
+    result = get_financial_behavior_profile(borrower_id, verified_only=True)
+
+    if not isinstance(result, dict) or result.get("status") != "success":
+        error_payload = result if isinstance(result, dict) else {
+            "status": "error",
+            "message": "Borrower financial history unavailable",
+        }
+        error_payload.setdefault("application_id", row["id"])
+        return jsonify(error_payload), 422
+
+    response_payload = dict(result)
+    response_payload["application_id"] = row["id"]
+    return jsonify(response_payload)
+
+
+
+@lender_bp.route("/lender/applications/<int:application_id>/demo-verified-history", methods=["POST"])
+@lender_required
+def seed_demo_verified_history(application_id):
+    """Load an explicitly synthetic bank-feed history for evaluation/demo use.
+
+    This never promotes borrower-entered transactions.  It inserts separate,
+    lender-triggered rows whose provenance is DEMO_BANK_SANDBOX so the UI can
+    demonstrate verified-only underwriting without misrepresenting self-reported
+    data as bank verified.  Ownership is still derived from the stored
+    application and signed-in lender.
+    """
+    lender_id = session["user_id"]
+    conn = get_db()
+    try:
+        app = conn.execute(
+            "SELECT id, borrower_id FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+        if not app:
+            abort(404)
+
+        borrower_id = app["borrower_id"]
+        # Four months is enough to demonstrate stability/trend calculations.
+        # Values are intentionally plausible and deterministic for repeatable demos.
+        monthly_rows = [
+            ("Salary credit", 60000, "income", "Salary"),
+            ("House rent", 12000, "expense", "Housing"),
+            ("Groceries", 6000, "expense", "Food"),
+            ("Utilities", 2500, "expense", "Bills"),
+            ("Transport", 3000, "expense", "Transport"),
+            ("Subscriptions", 1000, "expense", "Subscriptions"),
+        ]
+        inserted = 0
+        for month_offset in range(4):
+            for row_index, (description, amount, tx_type, category) in enumerate(monthly_rows, start=1):
+                ref = f"DEMO-BANK-{borrower_id}-{month_offset}-{row_index}"
+                cur = conn.execute(
+                    """
+                    INSERT INTO transactions
+                        (user_id, description, amount, type, category, date,
+                         transaction_timestamp, reference_id, source,
+                         verification_status, verification_source, verified_at,
+                         verification_reference, status)
+                    VALUES
+                        (%s,%s,%s,%s,%s,
+                         (CURRENT_DATE - (%s * INTERVAL '1 month'))::date,
+                         (CURRENT_TIMESTAMP - (%s * INTERVAL '1 month')),
+                         %s,'DEMO_BANK_SANDBOX','VERIFIED','SANDBOX_BANK_FEED',
+                         CURRENT_TIMESTAMP,%s,'completed')
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """,
+                    (borrower_id, description, amount, tx_type, category,
+                     month_offset, month_offset, ref, ref),
+                ).fetchone()
+                if cur:
+                    inserted += 1
+
+        _audit_event(
+            conn,
+            lender_id=lender_id,
+            application_id=application_id,
+            borrower_id=borrower_id,
+            event_type="ASSESSMENT",
+            metadata={
+                "action": "SANDBOX_VERIFIED_HISTORY_LOADED",
+                "inserted": inserted,
+                "source": "DEMO_BANK_SANDBOX",
+            },
+        )
+        conn.commit()
+        return jsonify({
+            "status": "success",
+            "inserted": inserted,
+            "source": "DEMO_BANK_SANDBOX",
+            "message": "Sandbox bank history loaded. These are synthetic VERIFIED demo records; borrower-entered records remain unverified.",
+        })
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@lender_bp.route("/lender/applications/<int:application_id>/repayment-capacity", methods=["POST"])
+@lender_required
+def repayment_capacity_lender_application(application_id):
+    """
+    Returns the affordability assessment for this application against
+    the linked borrower's actual FinTrust financial capacity.
+
+    Ownership: same `lender_id = session["user_id"]` filter as every
+    other lender endpoint here.
+
+    Borrower identity: resolved exclusively from
+    loan_applications.borrower_id. The proposed loan parameters
+    (credit_amount, duration_months) come from this application's own
+    stored application_data — never from the request body.
+
+    Delegates entirely to
+    services.affordability_service.calculate_affordability, which
+    already takes an explicit user_id — no changes to that service or
+    the underlying calculation were needed or made.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, borrower_id, application_data FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    borrower_id = row["borrower_id"]
+    applicant = _parse_application_data(row["application_data"])
+
+    result = calculate_affordability(borrower_id, applicant)
+
+    if not isinstance(result, dict) or result.get("status") != "success":
+        error_payload = result if isinstance(result, dict) else {
+            "status": "error",
+            "message": "Repayment capacity unavailable",
+        }
+        error_payload.setdefault("application_id", row["id"])
+        return jsonify(error_payload), 422
+
+    response_payload = dict(result)
+    response_payload["application_id"] = row["id"]
+    return jsonify(response_payload)
+
+
+# ---------------------------------------------------------------------
+# PHASE 6 — application anomaly for the currently selected application.
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/applications/<int:application_id>/anomaly", methods=["POST"])
+@lender_required
+def anomaly_lender_application(application_id):
+    """
+    Runs the verified anomaly check for one application.
+
+    Source of truth: the application's own stored application_data —
+    never anything supplied in this request. The frontend only sends
+    which application_id to check.
+
+    Ownership: same pattern as assess_lender_application /
+    explain_lender_application — the SQL filter
+    `lender_id = session["user_id"]` is the entire authorization check.
+    An application belonging to another lender matches zero rows and
+    gets a 404, identical to a nonexistent id.
+
+    Delegates entirely to
+    services.credit_risk_service.check_credit_anomaly, which wraps the
+    same canonical, offline-fitted Isolation Forest anomaly path used
+    elsewhere. No anomaly model, preprocessing, threshold, or algorithm
+    code lives here or is duplicated, and nothing is fit or retrained
+    on this request.
+
+    Not persisted this phase (per the Phase 6 brief) — recomputed from
+    the stored application_data on every call.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, application_data FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    applicant = _parse_application_data(row["application_data"])
+
+    result = check_credit_anomaly(applicant)
+
+    if not isinstance(result, dict) or result.get("status") != "success":
+        # Pass the service's own error through verbatim rather than
+        # inventing a message.
+        error_payload = result if isinstance(result, dict) else {
+            "status": "error",
+            "message": "Application anomaly analysis is currently unavailable.",
+        }
+        error_payload.setdefault("application_id", row["id"])
+        return jsonify(error_payload), 422
+
+    # Return the anomaly result verbatim, plus which application it's
+    # for. No recomputation or reinterpretation of is_anomaly,
+    # anomaly_score, anomaly_level, or manual_review happens here.
+    response_payload = dict(result)
+    response_payload["application_id"] = row["id"]
+    return jsonify(response_payload)
+
+
+# ---------------------------------------------------------------------
+# PHASE 7 — scenario analysis for the currently selected application.
+#
+# Baseline is always the application's own stored application_data —
+# never lwCurrentApplicant, never anything the client supplies. The
+# request may only carry scenario changes (a small whitelist of loan
+# variables); it can never replace the baseline applicant payload.
+# Scenario Analysis is exploratory: this endpoint never writes to
+# loan_applications.application_data, assessment_result, status, or
+# any other persisted field.
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/applications/<int:application_id>/scenario", methods=["POST"])
+@lender_required
+def scenario_lender_application(application_id):
+    """
+    Runs a what-if scenario against one application's stored data.
+
+    Ownership: same `lender_id = session["user_id"]` filter as every
+    other lender endpoint here. An application belonging to another
+    lender matches zero rows and gets a 404, identical to a
+    nonexistent id — so this endpoint never confirms or denies another
+    lender's application ids.
+
+    Baseline: the application's own stored application_data, loaded
+    fresh from the database on every call. The client-supplied request
+    body is filtered down to SCENARIO_ALLOWED_FIELDS before use, so it
+    can only nudge those specific values — it can never substitute a
+    different baseline applicant.
+
+    Delegates entirely to
+    services.credit_risk_service.analyze_credit_scenario, which is the
+    same verified scenario path used by the existing
+    POST /api/credit-risk/scenario endpoint. No scenario, model,
+    preprocessing, threshold, or decision-policy code lives here or is
+    duplicated, and nothing about this request is persisted —
+    application_data, assessment_result, and status are all left
+    untouched.
+    """
+    lender_id = session["user_id"]
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, application_data FROM loan_applications WHERE id=%s AND lender_id=%s",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    applicant = _parse_application_data(row["application_data"])
+
+    body = request.get_json(silent=True) or {}
+    raw_changes = body.get("changes") if isinstance(body.get("changes"), dict) else {}
+    changes = {
+        key: value
+        for key, value in raw_changes.items()
+        if key in SCENARIO_ALLOWED_FIELDS
+    }
+
+    result = analyze_credit_scenario(applicant, changes)
+
+    # analyze_credit_scenario() returns analyze_scenario()'s normalized
+    # result as-is, which carries no "status" key of its own — that
+    # convention (adding status="success" on the way out) belongs to
+    # the route layer, same as the existing POST /api/credit-risk/scenario
+    # endpoint. A dict without "errors" is a valid result; anything else
+    # (not a dict, or a dict carrying "errors") is an actual failure.
+    if not isinstance(result, dict) or "errors" in result:
+        # Pass the service's own error through verbatim rather than
+        # inventing a message.
+        error_payload = result if isinstance(result, dict) else {
+            "message": "Scenario analysis is currently unavailable.",
+        }
+        error_payload.setdefault("status", "error")
+        error_payload.setdefault("application_id", row["id"])
+        return jsonify(error_payload), 422
+
+    result["status"] = "success"
+
+    # Return the scenario result verbatim, plus which application it's
+    # for. No recomputation or reinterpretation of baseline/scenario
+    # probabilities, risk levels, decisions, delta, or interpretation
+    # happens here.
+    response_payload = dict(result)
+    response_payload["application_id"] = row["id"]
+    return jsonify(response_payload)
+
+
+# ---------------------------------------------------------------------
+# PHASE 8 — the lender's FINAL lending decision.
+#
+# This is the only place loan_applications.status changes after a
+# borrower submits it. The AI decision (assessment_result.decision) is
+# advisory only — it is never read, required, or auto-applied here.
+# The lender explicitly chooses APPROVED, REJECTED, or PENDING; nothing
+# about application_data, the AI assessment, or ownership is touched.
+# ---------------------------------------------------------------------
+
+# The only values a lender may set as the final application status.
+FINAL_DECISION_STATUSES = {"APPROVED", "REJECTED", "PENDING"}
+
+# Once an application reaches one of these, it is finalized and this
+# endpoint must refuse to change it again rather than silently
+# overwriting a prior decision. WITHDRAWN is included here even though
+# a lender can never *set* it (see FINAL_DECISION_STATUSES above) —
+# once a borrower withdraws, the application is just as terminal from
+# the lender's side as an APPROVED/REJECTED one.
+_FINALIZED_STATUSES = {"APPROVED", "REJECTED", "WITHDRAWN"}
+
+
+@lender_bp.route("/lender/applications/<int:application_id>/decision", methods=["POST"])
+@lender_required
+def decide_lender_application(application_id):
+    """
+    Records the lender's final decision (APPROVED / REJECTED / PENDING)
+    for one application.
+
+    Ownership: identical pattern to every other endpoint in this file —
+    `id = %s AND lender_id = session["user_id"]` is the entire
+    authorization boundary. An application belonging to another lender
+    matches zero rows and gets a 404, identical to a nonexistent id, so
+    this endpoint never confirms or denies another lender's application
+    ids.
+
+    The request body may only carry `decision`. borrower_id, lender_id,
+    and application_data are never read from the client here — the URL
+    path segment is the only application identity used, and the lender
+    identity comes only from the session.
+
+    Only the loan_applications.status and updated_at columns are
+    written. application_data, assessment_result, and assessed_at are
+    left completely untouched — this endpoint never reruns or
+    reinterprets the AI assessment.
+
+    An application already APPROVED, REJECTED, or WITHDRAWN cannot be
+    silently overwritten; the UPDATE is scoped to non-finalized rows,
+    and a finalized row is reported back as a conflict rather than
+    changed. A borrower-withdrawn application is terminal here too — a
+    lender can never approve or reject an application the borrower has
+    withdrawn.
+    """
+    lender_id = session["user_id"]
+
+    body = request.get_json(silent=True)
+    body = body if isinstance(body, dict) else {}
+    decision = body.get("decision")
+    decision = decision.strip().upper() if isinstance(decision, str) else None
+
+    if decision not in FINAL_DECISION_STATUSES:
+        return jsonify({
+            "status": "error",
+            "error_type": "validation_error",
+            "errors": ["Decision must be one of: APPROVED, REJECTED, PENDING."],
+        }), 400
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """SELECT id, borrower_id, status, assessment_result, application_data
+               FROM loan_applications
+               WHERE id=%s AND lender_id=%s""",
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    if row["status"] in _FINALIZED_STATUSES:
+        return jsonify({
+            "status": "error",
+            "error_type": "conflict",
+            "errors": ["This application has already been finalized." if row["status"] != "WITHDRAWN"
+                       else "This application was withdrawn by the borrower and can no longer be decided."],
+        }), 409
+
+    application_data = _parse_application_data(row.get("application_data")) if isinstance(row, dict) else {}
+    requested_amount = float(application_data.get("credit_amount") or 0)
+    requested_tenure = int(float(application_data.get("duration_months") or 0))
+
+    approved_amount = None
+    interest_rate = None
+    tenure_months = None
+    emi_amount = None
+
+    if decision == "APPROVED":
+        try:
+            approved_amount = float(body.get("approved_amount", requested_amount))
+            interest_rate = float(body.get("interest_rate", 12.0))
+            tenure_months = int(float(body.get("tenure_months", requested_tenure)))
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "error_type": "validation_error",
+                "errors": ["Approved amount, interest rate, and tenure must be numeric."],
+            }), 400
+
+        if approved_amount <= 0:
+            return jsonify({"status": "error", "error_type": "validation_error",
+                            "errors": ["Approved amount must be greater than zero."]}), 400
+        if requested_amount > 0 and approved_amount > requested_amount:
+            return jsonify({"status": "error", "error_type": "validation_error",
+                            "errors": ["Approved amount cannot exceed the requested loan amount."]}), 400
+        if interest_rate < 0 or interest_rate > 100:
+            return jsonify({"status": "error", "error_type": "validation_error",
+                            "errors": ["Interest rate must be between 0 and 100 percent."]}), 400
+        if tenure_months < 1 or tenure_months > 120:
+            return jsonify({"status": "error", "error_type": "validation_error",
+                            "errors": ["Loan tenure must be between 1 and 120 months."]}), 400
+
+        monthly_rate = interest_rate / 12.0 / 100.0
+        if monthly_rate == 0:
+            emi_amount = approved_amount / tenure_months
+        else:
+            factor = (1.0 + monthly_rate) ** tenure_months
+            emi_amount = approved_amount * monthly_rate * factor / (factor - 1.0)
+
+    # APPROVED also creates the sanction record in the same transaction as
+    # the human decision. The borrower cannot see an ACTIVE loan until the
+    # explicit demo-disbursement step is performed.
+    if decision in _FINALIZED_STATUSES:
+        decided_at_expr = "now()"
+        decided_by_value = lender_id
+    else:
+        decided_at_expr = "NULL"
+        decided_by_value = None
+
+    conn = get_db()
+    try:
+        updated = conn.execute(
+            f"""
+            UPDATE loan_applications
+            SET status = %s, updated_at = now(),
+                decided_at = {decided_at_expr}, decided_by = %s,
+                approved_amount = %s, interest_rate = %s, emi_amount = %s,
+                loan_term_months = %s,
+                loan_state = %s, disbursed_at = %s, outstanding_amount = %s
+            WHERE id = %s AND lender_id = %s AND status NOT IN ('APPROVED', 'REJECTED', 'WITHDRAWN')
+            RETURNING id, status, updated_at, decided_at, decided_by,
+                      approved_amount, interest_rate, emi_amount, loan_term_months,
+                      loan_state, disbursed_at, outstanding_amount
+            """,
+            (
+                decision,
+                decided_by_value,
+                approved_amount,
+                interest_rate,
+                emi_amount,
+                tenure_months,
+                'SANCTIONED' if decision == 'APPROVED' else ('REJECTED' if decision == 'REJECTED' else 'APPLICATION'),
+                None,
+                approved_amount if decision == 'APPROVED' else None,
+                application_id,
+                lender_id,
+            ),
+        ).fetchone()
+        if not updated:
+            conn.rollback()
+        else:
+            assessment = _parse_jsonb(row.get("assessment_result")) if isinstance(row, dict) else row["assessment_result"]
+            _audit_event(
+                conn,
+                lender_id=lender_id,
+                application_id=application_id,
+                borrower_id=row["borrower_id"],
+                event_type="DECISION",
+                assessment=assessment or {},
+                lender_decision=decision if decision in _FINALIZED_STATUSES else None,
+                metadata={
+                    "status_before": row["status"],
+                    "status_after": decision,
+                    "loan_state": updated["loan_state"],
+                    "approved_amount": approved_amount,
+                    "interest_rate": interest_rate,
+                    "loan_term_months": tenure_months,
+                    "emi_amount": emi_amount,
+                },
+            )
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        return jsonify({
+            "status": "error",
+            "error_type": "internal_error",
+            "errors": ["Failed to record decision. Please try again."],
+        }), 500
+    finally:
+        conn.close()
+
+    if not updated:
+        # Finalized (approved/rejected) or withdrawn by a concurrent
+        # request between the check above and this UPDATE — report the
+        # same conflict rather than a fabricated success.
+        return jsonify({
+            "status": "error",
+            "error_type": "conflict",
+            "errors": ["This application can no longer be decided."],
+        }), 409
+
+    return jsonify({
+        "status": "success",
+        "application_id": updated["id"],
+        "application_status": updated["status"],
+        "updated_at": updated["updated_at"].isoformat() if updated["updated_at"] else None,
+        "decided_at": updated["decided_at"].isoformat() if updated["decided_at"] else None,
+        "decided_by": updated["decided_by"],
+        "loan": {
+            "state": updated["loan_state"],
+            "approved_amount": updated["approved_amount"],
+            "interest_rate": updated["interest_rate"],
+            "emi_amount": updated["emi_amount"],
+            "tenure_months": updated["loan_term_months"],
+            "disbursed_at": updated["disbursed_at"].isoformat() if updated["disbursed_at"] else None,
+            "outstanding_amount": updated["outstanding_amount"],
+        },
+    })
+
+
+# ---------------------------------------------------------------------
+# PHASE 10 — PORTFOLIO RISK INTELLIGENCE
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/portfolio", methods=["GET"])
+@lender_required
+def lender_portfolio():
+    """Portfolio-level risk view for the signed-in lender only."""
+    lender_id = session["user_id"]
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, status, application_data, assessment_result
+            FROM loan_applications
+            WHERE lender_id = %s AND status <> 'WITHDRAWN'
+            ORDER BY updated_at DESC
+            """,
+            (lender_id,),
+        ).fetchall()
+
+        # Current risk distribution/exposure.
+        total = len(rows)
+        assessed = 0
+        risk_counts = Counter()
+        exposure = 0.0
+        high_exposure = 0.0
+        probabilities = []
+        for row in rows:
+            data = _parse_application_data(row["application_data"])
+            amount = float(data.get("credit_amount") or 0)
+            exposure += amount
+            assessment = _parse_jsonb(row["assessment_result"]) or {}
+            level = assessment.get("risk_level")
+            prob = assessment.get("risk_probability")
+            if level:
+                assessed += 1
+                normalized = "HIGH" if "HIGH" in str(level).upper() else "MEDIUM" if "MEDIUM" in str(level).upper() else "LOW"
+                risk_counts[normalized] += 1
+                if prob is not None:
+                    probabilities.append(float(prob))
+                if normalized == "HIGH":
+                    high_exposure += amount
+
+        avg_probability = (sum(probabilities) / len(probabilities)) if probabilities else None
+        risk_score = round(avg_probability * 100, 1) if avg_probability is not None else None
+
+        # Recent risk migration from assessment audit events: compare each application's
+        # latest assessment with its previous assessment, scoped to this lender.
+        migration = Counter()
+        audit_rows = conn.execute(
+            """
+            SELECT application_id, risk_level, created_at
+            FROM lender_decision_audit
+            WHERE lender_id=%s AND event_type='ASSESSMENT'
+            ORDER BY application_id, created_at ASC
+            """,
+            (lender_id,),
+        ).fetchall()
+        previous = {}
+        for ar in audit_rows:
+            current = str(ar["risk_level"] or "").upper()
+            if ar["application_id"] in previous and current and previous[ar["application_id"]] and current != previous[ar["application_id"]]:
+                migration[f"{previous[ar['application_id']]} → {current}"] += 1
+            if current:
+                previous[ar["application_id"]] = current
+
+        # Configurable reference benchmark; intentionally labeled as a reference, not real market data.
+        benchmark_high = float(os.getenv("FINTRUST_REFERENCE_HIGH_RISK_PCT", "14"))
+        portfolio_high_pct = (risk_counts["HIGH"] / assessed * 100) if assessed else None
+        benchmark_delta = (portfolio_high_pct - benchmark_high) if portfolio_high_pct is not None else None
+
+        return jsonify({
+            "status": "success",
+            "portfolio": {
+                "total_loans": total,
+                "assessed_loans": assessed,
+                "total_exposure": round(exposure, 2),
+                "high_risk_exposure": round(high_exposure, 2),
+                "risk_distribution": dict(risk_counts),
+                "average_risk_probability": round(avg_probability, 4) if avg_probability is not None else None,
+                "portfolio_risk_score": risk_score,
+                "high_risk_percentage": round(portfolio_high_pct, 1) if portfolio_high_pct is not None else None,
+                "risk_migration": dict(migration),
+                "reference_benchmark": {
+                    "label": "Reference benchmark",
+                    "source": "Configurable demo benchmark",
+                    "high_risk_percentage": benchmark_high,
+                    "difference_points": round(benchmark_delta, 1) if benchmark_delta is not None else None,
+                },
+            },
+        })
+    finally:
+        conn.close()
+
+
+@lender_bp.route("/lender/audit-trail", methods=["GET"])
+@lender_required
+def lender_audit_trail():
+    """Paginated lender decision ledger, strictly tenant-scoped."""
+    lender_id = session["user_id"]
+    try:
+        limit = max(1, min(int(request.args.get("limit", 50)), 200))
+        application_id = request.args.get("application_id", type=int)
+    except (TypeError, ValueError):
+        limit = 50
+        application_id = None
+
+    conn = get_db()
+    try:
+        if application_id:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.application_id, a.borrower_id, a.event_type,
+                       a.model_version, a.risk_probability, a.risk_level,
+                       a.ai_decision, a.lender_decision, a.reason_summary,
+                       a.metadata, a.created_at, u.name AS borrower_name
+                FROM lender_decision_audit a
+                JOIN loan_applications la ON la.id=a.application_id AND la.lender_id=%s
+                LEFT JOIN users u ON u.id=a.borrower_id
+                WHERE a.lender_id=%s AND a.application_id=%s
+                ORDER BY a.created_at DESC LIMIT %s
+                """, (lender_id, lender_id, application_id, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.application_id, a.borrower_id, a.event_type,
+                       a.model_version, a.risk_probability, a.risk_level,
+                       a.ai_decision, a.lender_decision, a.reason_summary,
+                       a.metadata, a.created_at, u.name AS borrower_name
+                FROM lender_decision_audit a
+                LEFT JOIN users u ON u.id=a.borrower_id
+                WHERE a.lender_id=%s
+                ORDER BY a.created_at DESC LIMIT %s
+                """, (lender_id, limit)
+            ).fetchall()
+    finally:
+        conn.close()
+
+    return jsonify({
+        "status": "success",
+        "events": [
+            {
+                "id": r["id"], "application_id": r["application_id"],
+                "borrower_id": r["borrower_id"], "borrower_name": r["borrower_name"],
+                "event_type": r["event_type"], "model_version": r["model_version"],
+                "risk_probability": r["risk_probability"], "risk_level": r["risk_level"],
+                "ai_decision": r["ai_decision"], "lender_decision": r["lender_decision"],
+                "reasons": _parse_jsonb(r["reason_summary"]) or [],
+                "metadata": _parse_jsonb(r["metadata"]) or {},
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+    })
+
+
+# ---------------------------------------------------------------------
+# PHASE 9 — "AI Risk Analyst" Q&A over an application's EXISTING,
+# already-computed assessment.
+#
+# This endpoint never calculates a new risk score and never makes an
+# independent approve/reject decision. It:
+#   1. Verifies the logged-in lender can access the application, using
+#      the exact same `lender_id = session["user_id"]` ownership filter
+#      as every other endpoint in this file (same 404-for-both pattern
+#      for "not yours" vs "doesn't exist").
+#   2. Loads the AUTHORITATIVE, already-PERSISTED assessment_result
+#      (written by POST /lender/applications/<id>/assess) — it is read
+#      here, never recomputed.
+#   3. Builds a compact evidence context (services/risk_assistant_service.py)
+#      from the same non-scoring, read-only calls other lender endpoints
+#      already use (explanation, anomaly, affordability, borrower
+#      financial behavior) — no raw transaction history is sent.
+#   4. Sends that context + the lender's question to the existing Gemini
+#      service (services/gemini_service.generate_json) and returns its
+#      answer verbatim.
+# ---------------------------------------------------------------------
+
+@lender_bp.route("/lender/risk-assistant", methods=["POST"])
+@lender_required
+def risk_assistant():
+    """
+    POST /lender/risk-assistant
+    Body: {"application_id": <int>, "question": "<str>"}
+    Returns: {"success": true, "answer": "<str>"} on success, or
+             {"success": false, "error": "<str>"} on failure.
+    """
+    lender_id = session["user_id"]
+
+    body = request.get_json(silent=True)
+    if body is None or not isinstance(body, dict):
+        return jsonify({
+            "success": False,
+            "error": "Request body must be a JSON object.",
+        }), 400
+
+    raw_application_id = body.get("application_id")
+    try:
+        application_id = int(raw_application_id)
+    except (TypeError, ValueError):
+        return jsonify({
+            "success": False,
+            "error": "application_id must be a valid application id.",
+        }), 400
+
+    question = body.get("question")
+    question = question.strip() if isinstance(question, str) else ""
+    if not question:
+        return jsonify({
+            "success": False,
+            "error": "question must not be empty.",
+        }), 400
+
+    # Ownership: identical pattern to every other endpoint in this file.
+    # An application belonging to another lender matches zero rows and
+    # gets the same 404 as a nonexistent id, so this never confirms or
+    # denies another lender's application ids (i.e. "unauthorized" and
+    # "missing" are intentionally indistinguishable to the caller).
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, borrower_id, application_data, assessment_result
+            FROM loan_applications
+            WHERE id = %s AND lender_id = %s
+            """,
+            (application_id, lender_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        abort(404)
+
+    assessment_result = _parse_jsonb(row["assessment_result"])
+    if not assessment_result:
+        # Nothing authoritative to ground the assistant in yet — this
+        # deliberately does NOT fall back to running a fresh assessment
+        # here; that only ever happens via POST .../assess.
+        return jsonify({
+            "success": False,
+            "error": "This application has not been assessed yet. Run the risk assessment first.",
+        }), 422
+
+    applicant = _parse_application_data(row["application_data"])
+    borrower_id = row["borrower_id"]
+
+    try:
+        result = answer_risk_assistant_question(
+            applicant=applicant,
+            borrower_id=borrower_id,
+            assessment_result=assessment_result,
+            question=question,
+        )
+    except Exception:
+        return jsonify({
+            "success": False,
+            "error": "The AI risk analyst failed unexpectedly. Please try again.",
+        }), 500
+
+    if not isinstance(result, dict) or result.get("status") != "success":
+        errors = result.get("errors") if isinstance(result, dict) else None
+        message = errors[0] if errors else "The AI risk analyst is currently unavailable."
+        status_code = 502 if isinstance(result, dict) and result.get("error_type") == "gemini_error" else 422
+        return jsonify({
+            "success": False,
+            "error": message,
+        }), status_code
+
+    return jsonify({
+        "success": True,
+        "answer": result["answer"],
+    })
